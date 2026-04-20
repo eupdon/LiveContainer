@@ -527,7 +527,7 @@ struct EdgeHandleView: View {
             // Pill indicator (like iOS home bar)
             RoundedRectangle(cornerRadius: 3)
                 .fill(Color.white.opacity(0.5))
-                .frame(width: 4, height: 44)
+                .frame(width: 4, height: 35)
                 .scaleEffect(x: pillScale.width, y: pillScale.height, anchor: .bottom)
                 .animation(.interactiveSpring(), value: dragTranslation)
         }
