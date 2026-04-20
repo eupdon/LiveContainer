@@ -774,15 +774,17 @@ class AppInfoProvider {
         }
     }
     
-    // 수정: 멀티테스크 제스쳐 동작 변경
+    // 수정: 멀티테스크 제스쳐 오른쪽 변으로 변경
     private func setupEdgeGestureRecognizers() {
         guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
               let keyWindow = windowScene.windows.first else { return }
 
+        // 기존 제스처 청소
         keyWindow.gestureRecognizers?.removeAll { gesture in
-              return gesture is UIScreenEdgePanGestureRecognizer
+            return gesture is UIScreenEdgePanGestureRecognizer
         }
         
+        // 오른쪽 한 변 전체를 제스처 영역으로 등록 (독이 숨겨져 있을 때만)
         if isDockHidden { 
             let rightEdgeGesture = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(handleEdgeSwipe(_:)))
             rightEdgeGesture.edges = .right
@@ -806,10 +808,14 @@ class AppInfoProvider {
             if let startTime = self.gestureStartTime, !hasTriggeredDock {
                 let duration = Date().timeIntervalSince(startTime)
                 
-                // 0.3초 이상 머물렀고, 일정 거리 이상 들어왔을 때
+                // 0.3초 이상 머물렀고, 일정 거리(30pt) 이상 들어왔을 때 독 호출
                 if duration > 0.3 && abs(translation.x) > 30 {
                     self.hasTriggeredDock = true
-                    self.showDockFromHidden() // 기존의 독 보여주기 함수 호출
+                    
+                    // 독이 옆으로 밀려오지 않게 단순히 상태만 변경하여 팝업시킴
+                    withAnimation(.spring()) {
+                        self.isDockHidden = false
+                    }
                     
                     // 햅틱 진동 (성공 신호)
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
@@ -817,15 +823,14 @@ class AppInfoProvider {
             }
             
         case .ended:
-            // 3. 손을 뗄 때까지 독이 안 떴고, 속도가 빠르면 '최소화' 실행
+            // 3. 손을 뗄 때까지 독이 안 떴고, 왼쪽으로 빠르게 던졌다면 '최소화' 실행
             if !hasTriggeredDock {
-                // 왼쪽으로 휙 던지는 속도 (보통 -500 이하면 아주 빠름)
                 if velocity < -500 {
-                    self.minimizeAllWindows() // 현재 앱 최소화
+                    self.minimizeAllWindows() // 현재 앱 최소화 로직
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 }
             }
-            // 초기화
+            // 상태 초기화
             self.gestureStartTime = nil
             self.hasTriggeredDock = false
             
@@ -834,6 +839,7 @@ class AppInfoProvider {
             self.hasTriggeredDock = false
         }
     }
+
     
     // MARK: - Multitask Mode Check
     private func isDockEnabled() -> Bool {
