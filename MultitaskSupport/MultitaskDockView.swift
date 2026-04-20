@@ -465,6 +465,7 @@ public struct MultitaskDockSwiftView: View {
         GeometryReader { geo in
             ZStack {
                 Color.clear
+                    .background(Color.black.opacity(0.001))
                     .contentShape(Rectangle())
                     .onTapGesture { 
                         dockManager.closeDockPanel() 
