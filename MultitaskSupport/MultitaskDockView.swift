@@ -479,14 +479,14 @@ public struct MultitaskDockSwiftView: View {
                     VStack {
                         Spacer()
                         DockPanelView()
-                            .frame(width: Constants.dockPanelWidth, height: geo.size.height * 0.8)
+                            .frame(width: MultitaskDockManager.Constants.dockPanelWidth, height: geo.size.height * 0.8)
                             .opacity(dockManager.isDockOpen ? 1 : 0)
                             .allowsHitTesting(dockManager.isDockOpen)
                         Spacer()
                     }
 
                     EdgeHandleView()
-                        .frame(width: Constants.handleWidth, height: geo.size.height)
+                        .frame(width: MultitaskDockManager.Constants.handleWidth, height: geo.size.height)
                 }
             }
         }
