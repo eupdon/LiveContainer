@@ -136,6 +136,10 @@ class AppInfoProvider {
     @Published var isDockHidden: Bool = false
     @Published var settingsChanged: Bool = false
 
+    //제스쳐 동작 변경
+    private var gestureStartTime: Date?
+    private var hasTriggeredDock = false
+
     @objc public var windowHostingView = VirtualWindowsHostView()
     internal var hostingController: UIHostingController<AnyView>?
 
@@ -770,7 +774,7 @@ class AppInfoProvider {
         }
     }
     
-    // Add edge gesture recognition areas when dock is hidden
+    // 수정: 멀티테스크 제스쳐 동작 변경
     private func setupEdgeGestureRecognizers() {
         guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
               let keyWindow = windowScene.windows.first else { return }
@@ -786,17 +790,48 @@ class AppInfoProvider {
         }
     }
 
-    // 수정: 멀티테스크 제스쳐
+    // 수정: 멀티테스크 제스쳐 동작 시간
     @objc private func handleEdgeSwipe(_ gesture: UIScreenEdgePanGestureRecognizer) {
-        guard isDockHidden, gesture.state == .began || gesture.state == .changed else {
-            return
-        }
-        
         let translation = gesture.translation(in: gesture.view)
-        let swipeDistance = abs(translation.x)
+        let velocity = gesture.velocity(in: gesture.view).x // 가로 속도 (-값이면 왼쪽 방향)
         
-        if swipeDistance > Constants.edgeSwipeThreshold {
-            showDockFromHidden()
+        switch gesture.state {
+        case .began:
+            // 1. 제스처 시작 시간과 상태 초기화
+            self.gestureStartTime = Date()
+            self.hasTriggeredDock = false
+            
+        case .changed:
+            // 2. 0.3초 이상 멈춰 있거나 천천히 밀면 '홀드'로 판단하여 독 표시
+            if let startTime = self.gestureStartTime, !hasTriggeredDock {
+                let duration = Date().timeIntervalSince(startTime)
+                
+                // 0.3초 이상 머물렀고, 일정 거리 이상 들어왔을 때
+                if duration > 0.3 && abs(translation.x) > 30 {
+                    self.hasTriggeredDock = true
+                    self.showDockFromHidden() // 기존의 독 보여주기 함수 호출
+                    
+                    // 햅틱 진동 (성공 신호)
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                }
+            }
+            
+        case .ended:
+            // 3. 손을 뗄 때까지 독이 안 떴고, 속도가 빠르면 '최소화' 실행
+            if !hasTriggeredDock {
+                // 왼쪽으로 휙 던지는 속도 (보통 -500 이하면 아주 빠름)
+                if velocity < -500 {
+                    self.minimizeAllWindows() // 현재 앱 최소화
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                }
+            }
+            // 초기화
+            self.gestureStartTime = nil
+            self.hasTriggeredDock = false
+            
+        default:
+            self.gestureStartTime = nil
+            self.hasTriggeredDock = false
         }
     }
     
