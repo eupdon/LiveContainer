@@ -281,11 +281,11 @@ class AppInfoProvider {
     @objc public func hideDock() {
         guard isVisible, let hc = hostingController else { return }
         DispatchQueue.main.async {
+            self.isDockOpen = false  // 즉시 설정
             UIView.animate(withDuration: Constants.springResponse) {
                 hc.view.alpha = 0
             } completion: { _ in
                 self.isVisible = false
-                self.isDockOpen = false
             }
         }
     }
@@ -463,33 +463,27 @@ public struct MultitaskDockSwiftView: View {
 
     public var body: some View {
         GeometryReader { geo in
-            ZStack(alignment: .trailing) {
-                // 바깥 전체 터치 레이어 (독이 열려있을 때만)
-                if dockManager.isDockOpen {
-                    Rectangle()
-                        .fill(Color.black)
-                        .opacity(0.001)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            dockManager.closeDockPanel()
-                        }
-                }
+            ZStack {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { 
+                        dockManager.closeDockPanel() 
+                    }
 
                 HStack(spacing: 0) {
-                    Rectangle().fill(Color.clear)
-                        .frame(width: geo.size.width - MultitaskDockManager.Constants.dockPanelWidth - MultitaskDockManager.Constants.handleWidth)
+                    Spacer()
 
                     VStack {
                         Spacer()
                         DockPanelView()
-                            .frame(width: MultitaskDockManager.Constants.dockPanelWidth, height: geo.size.height * 0.8)
+                            .frame(width: Constants.dockPanelWidth, height: geo.size.height * 0.8)
                             .opacity(dockManager.isDockOpen ? 1 : 0)
                             .allowsHitTesting(dockManager.isDockOpen)
                         Spacer()
                     }
 
                     EdgeHandleView()
-                        .frame(width: MultitaskDockManager.Constants.handleWidth, height: geo.size.height)
+                        .frame(width: Constants.handleWidth, height: geo.size.height)
                 }
             }
         }
