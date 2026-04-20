@@ -774,22 +774,19 @@ class AppInfoProvider {
     private func setupEdgeGestureRecognizers() {
         guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
               let keyWindow = windowScene.windows.first else { return }
-        
+
         keyWindow.gestureRecognizers?.removeAll { gesture in
-            return gesture is UITapGestureRecognizer || gesture is UIScreenEdgePanGestureRecognizer
+              return gesture is UIScreenEdgePanGestureRecognizer
         }
         
-        if isDockHidden {
-            let leftEdgeGesture = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(handleEdgeSwipe(_:)))
-            leftEdgeGesture.edges = .left
-            keyWindow.addGestureRecognizer(leftEdgeGesture)
-            
+        if isDockHidden { 
             let rightEdgeGesture = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(handleEdgeSwipe(_:)))
             rightEdgeGesture.edges = .right
             keyWindow.addGestureRecognizer(rightEdgeGesture)
         }
     }
-    
+
+    // 수정: 멀티테스크 제스쳐
     @objc private func handleEdgeSwipe(_ gesture: UIScreenEdgePanGestureRecognizer) {
         guard isDockHidden, gesture.state == .began || gesture.state == .changed else {
             return
