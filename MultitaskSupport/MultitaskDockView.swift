@@ -3,6 +3,7 @@
 //  LiveContainer
 //
 //  Created by boa-z on 2025/6/28.
+//  Refactored: Right-edge fixed dock with iOS home gesture style
 //
 
 import Foundation
@@ -125,169 +126,61 @@ class AppInfoProvider {
     }
 }
 
-// MARK: - MultitaskDockView Manager
+// MARK: - MultitaskDockManager
 @available(iOS 16.0, *)
 @objc public class MultitaskDockManager: NSObject, ObservableObject {
     @objc public static let shared = MultitaskDockManager()
-    
+
     @Published var apps: [DockAppModel] = []
     @Published var isVisible: Bool = false
+    /// true = dock panel is open (slid in from right edge)
+    @Published var isDockOpen: Bool = false
     @Published @objc var isCollapsed: Bool = false
-    @Published var isDockHidden: Bool = false
     @Published var settingsChanged: Bool = false
-
-    //제스쳐 동작 변경
-    private var gestureStartTime: Date?
-    private var hasTriggeredDock = false
 
     @objc public var windowHostingView = VirtualWindowsHostView()
     internal var hostingController: UIHostingController<AnyView>?
 
+    // MARK: - Constants
     public struct Constants {
-        // MARK: - Layout & Sizing
-        static let defaultDockWidth: CGFloat = 90.0
-        static let minAdaptiveDockWidth: CGFloat = 50.0
-        static let minAdaptiveIconSize: CGFloat = 10.0
-        static let maxIconSize: CGFloat = 100.0
-        static let minCollapsedHeight: CGFloat = 60.0
-        static let minCollapsedButtonSize: CGFloat = 44.0
-        static let maxCollapsedButtonSize: CGFloat = 80.0
-        static let initialDockShowHeight: CGFloat = 120.0
+        /// Width of the visible dock panel when open
+        static let dockPanelWidth: CGFloat = 80.0
+        /// Width of the always-visible edge handle strip
+        static let handleWidth: CGFloat = 6.0
+        /// Icon size inside the dock panel
+        static let iconSize: CGFloat = 52.0
+        /// Spacing between icons
+        static let iconSpacing: CGFloat = 12.0
+        /// Vertical padding inside panel
+        static let panelVerticalPadding: CGFloat = 20.0
 
-        // MARK: - Margins & Padding
-        static let adaptiveWidthVerticalMargin: CGFloat = 20.0
-        static let dockVerticalMargin: CGFloat = 30.0
-        static let dockContentSpacing: CGFloat = 8.0
-        static let dockVerticalPadding: CGFloat = 30.0
-        // Extra padding is derived from dockVerticalPadding to match the SwiftUI layout exactly
-        
-        // MARK: - Ratios & Factors
-        static let iconToWidthRatio: CGFloat = 0.75
-        static let collapsedButtonToWidthRatio: CGFloat = 0.7
-        static let maxHeightRatioOfAvailableArea: CGFloat = 0.85
-        
-        // MARK: - Animation & Interaction
-        static var dockHiddenOffset: CGFloat {
-            get {
-                let ans = LCUtils.appGroupUserDefault.double(forKey: "LCDockWidth")
-                if ans != 0 {
-                    return ans * 2 / 3
-                } else {
-                    return 50
-                }
-            }
-        }
-        static var hideGestureThreshold: CGFloat {
-            get {
-                let ans = LCUtils.appGroupUserDefault.double(forKey: "LCDockWidth")
-                if ans != 0 {
-                    return ans / 5
-                } else {
-                    return 16
-                }
-            }
-        }
-        static let edgeSwipeThreshold: CGFloat = 30.0
-        
-        static let standardAnimationDuration: TimeInterval = 0.3
-        static let longAnimationDuration: TimeInterval = 0.4
-        static let shortAnimationDuration1: TimeInterval = 0.15
-        static let shortAnimationDuration2: TimeInterval = 0.1
-        
-        static let standardSpringDamping: CGFloat = 0.8
-        static let showHideSpringDamping: CGFloat = 0.7
-        static let standardSpringVelocity: CGFloat = 0.3
-        static let showHideSpringVelocity: CGFloat = 0.5
-        
-        static let initialScale: CGFloat = 0.8
+        // Gesture thresholds
+        /// Upward drag distance to trigger minimize (short gesture)
+        static let minimizeThreshold: CGFloat = 30.0
+        /// Leftward drag distance on handle to open dock (long-ish pull)
+        static let openDockThreshold: CGFloat = 40.0
+        /// Long-press duration to open dock
+        static let longPressDuration: TimeInterval = 0.4
+
+        // Animation
+        static let springResponse: TimeInterval = 0.35
+        static let springDamping: CGFloat = 0.8
+        static let shortAnimDuration: TimeInterval = 0.15
+        static let shortAnimDuration2: TimeInterval = 0.1
         static let bringToFrontScale: CGFloat = 1.02
-    }
-    
-    // Original dock width from user settings (without auto-adjustment)
-    private var originalDockWidth: CGFloat {
-        let storedValue = LCUtils.appGroupUserDefault.double(forKey: "LCDockWidth")
-        return storedValue > 0 ? CGFloat(storedValue) : Constants.defaultDockWidth
-    }
-    
-    // Calculate adaptive dock width (auto-adjust when exceeding safe area)
-    public var dockWidth: CGFloat {
-        guard !apps.isEmpty else { return originalDockWidth }
-        
-        let totalVerticalMargin = Constants.adaptiveWidthVerticalMargin * 2
-        let availableHeight = self.safeAreaHeight - totalVerticalMargin
-        
-        let maxSafeHeight = availableHeight * Constants.maxHeightRatioOfAvailableArea
-        
-        let userWidth = originalDockWidth
-        let iconSize = calculateIconSize(for: userWidth)
-        let requiredHeight = expandedDockHeight(for: userWidth, iconSize: iconSize)
-        
-        if requiredHeight > maxSafeHeight && !apps.isEmpty {
-            let buttonSize = calculateButtonSize(for: userWidth)
-            let baseHeight = expandedDockBaseHeight(for: userWidth, buttonSize: buttonSize)
-            let availableForIcons = maxSafeHeight - baseHeight
-            let maxAllowedIconSize = availableForIcons / CGFloat(apps.count)
-            
-            let targetIconSize = max(Constants.minAdaptiveIconSize, maxAllowedIconSize)
-            
-            let targetWidth = targetIconSize / Constants.iconToWidthRatio
-            
-            return max(Constants.minAdaptiveDockWidth, targetWidth)
-        }
-        
-        return userWidth
-    }
-    
-    // Calculate icon size based on dock width
-    private func calculateIconSize(for width: CGFloat) -> CGFloat {
-        let iconSize = width * Constants.iconToWidthRatio
-        return max(Constants.minAdaptiveIconSize, min(Constants.maxIconSize, iconSize))
+        static let initialScale: CGFloat = 0.8
     }
 
-    private func calculateButtonSize(for width: CGFloat) -> CGFloat {
-        let targetSize = width * Constants.collapsedButtonToWidthRatio
-        return max(Constants.minCollapsedButtonSize, min(Constants.maxCollapsedButtonSize, targetSize))
-    }
-
-    private func expandedDockBaseHeight(for width: CGFloat, buttonSize: CGFloat) -> CGFloat {
-        let spacingCount = max(self.apps.count + 1, 0)
-        let totalSpacingHeight = CGFloat(spacingCount) * Constants.dockContentSpacing
-        return Constants.dockVerticalPadding + buttonSize * 2 + totalSpacingHeight
-    }
-
-    private func expandedDockHeight(for width: CGFloat, iconSize: CGFloat) -> CGFloat {
-        let buttonSize = calculateButtonSize(for: width)
-        let baseHeight = expandedDockBaseHeight(for: width, buttonSize: buttonSize)
-        let iconHeight = CGFloat(self.apps.count) * iconSize
-        return baseHeight + iconHeight
-    }
-
-    private func collapsedDockHeight(for width: CGFloat) -> CGFloat {
-        let buttonSize = calculateButtonSize(for: width)
-        return Constants.dockVerticalPadding + buttonSize
-    }
-    
-
-    // Calculate adaptive icon size
-    public var adaptiveIconSize: CGFloat {
-        return calculateIconSize(for: dockWidth)
-    }
-
+    // MARK: - Window / Safe Area
     public var keyWindow: UIWindow? {
         (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.windows.first
     }
 
     public var safeAreaInsets: UIEdgeInsets {
-        if #available(iOS 11.0, *) {
-            return keyWindow?.safeAreaInsets ?? .zero
-        }
-        return .zero
+        keyWindow?.safeAreaInsets ?? .zero
     }
 
-    private var safeAreaHeight: CGFloat {
-        keyWindow!.bounds.height - safeAreaInsets.top - safeAreaInsets.bottom
-    }
-    
+    // MARK: - Init
     override init() {
         super.init()
         keyWindow!.rootViewController!.view.subviews.first!.addSubview(self.windowHostingView)
@@ -305,274 +198,165 @@ class AppInfoProvider {
             object: nil
         )
     }
-    
+
     deinit {
         NotificationCenter.default.removeObserver(self)
-        NotificationCenter.default.removeObserver(self, name: UIDevice.orientationDidChangeNotification, object: nil)
     }
 
     @objc private func deviceOrientationDidChange() {
         DispatchQueue.main.async {
-            if self.isVisible {
-                self.updateDockFrame()
-            }
+            if self.isVisible { self.updateDockFrame(animated: false) }
         }
     }
-    
+
     @objc private func userDefaultsDidChange() {
         DispatchQueue.main.async {
             self.settingsChanged.toggle()
-            if self.isVisible {
-                self.updateDockFrame()
-            }
         }
     }
-    
+
+    // MARK: - Setup
     private func setupDockView() {
         DispatchQueue.main.async {
-            let dockView = AnyView(MultitaskDockSwiftView()
-                .environmentObject(self))
-            
+            let dockView = AnyView(
+                MultitaskDockSwiftView()
+                    .environmentObject(self)
+            )
             self.hostingController = UIHostingController(rootView: dockView)
-            self.hostingController?.view.autoresizingMask = [.flexibleTopMargin, .flexibleLeftMargin, .flexibleRightMargin, .flexibleBottomMargin]
             self.hostingController?.view.backgroundColor = .clear
+            self.hostingController?.view.isUserInteractionEnabled = true
         }
+    }
+
+    // MARK: - Frame (right edge, full height)
+    /// The dock hosting view always covers the full right edge of the screen.
+    /// Its width equals handleWidth + dockPanelWidth so the handle is always
+    /// visible and the panel slides in/out via SwiftUI offset.
+    private func fullEdgeFrame() -> CGRect {
+        guard let win = keyWindow else { return .zero }
+        let b = win.bounds
+        let totalWidth = Constants.handleWidth + Constants.dockPanelWidth
+        return CGRect(
+            x: b.width - totalWidth,
+            y: 0,
+            width: totalWidth,
+            height: b.height
+        )
     }
 
     private func updateDockFrame(animated: Bool = true) {
-    }
-
-    // MARK: - Frame Calculation Helpers
-
-    private func calculateTargetDockHeight(forWidth width: CGFloat) -> CGFloat {
-        if isCollapsed {
-            let collapsedHeight = collapsedDockHeight(for: width)
-            return max(Constants.minCollapsedHeight, collapsedHeight)
-        } else {
-            let currentIconSize = calculateIconSize(for: width)
-            return expandedDockHeight(for: width, iconSize: currentIconSize)
-        }
-    }
-
-    func calculateTargetX(isDockHidden: Bool, isOnRightSide: Bool, dockWidth: CGFloat, screenWidth: CGFloat) -> CGFloat {
-
-        let safeInsets = self.safeAreaInsets
-        var ans : CGFloat
-        if isOnRightSide {
-            ans = screenWidth - dockWidth
-            if self.hostingController?.view.window?.windowScene?.interfaceOrientation == UIInterfaceOrientation.landscapeLeft {
-                ans -= safeInsets.right
-            }
-            
-            if isDockHidden {
-                ans += Constants.dockHiddenOffset
-            }
-        } else {
-            ans = 0
-            if self.hostingController?.view.window?.windowScene?.interfaceOrientation == UIInterfaceOrientation.landscapeRight {
-                ans += safeInsets.left
-            }
-            if isDockHidden {
-                ans -= Constants.dockHiddenOffset
-            }
-        }
-        
-        return ans;
-
-    }
-
-    private func calculateTargetY(for currentFrame: CGRect, dockHeight: CGFloat, screenHeight: CGFloat) -> CGFloat {
-        let safeAreaMinY = self.safeAreaInsets.top + Constants.dockVerticalMargin
-        let safeAreaMaxY = screenHeight - self.safeAreaInsets.bottom - dockHeight - Constants.dockVerticalMargin
-        
-        if currentFrame.height > 0 {
-            let desiredY = currentFrame.midY - dockHeight / 2
-            return max(safeAreaMinY, min(safeAreaMaxY, desiredY))
-        } else {
-            let safeAreaCenterY = safeAreaMinY + (safeAreaMaxY - safeAreaMinY) / 2
-            return max(safeAreaMinY, min(safeAreaMaxY, safeAreaCenterY - dockHeight / 2))
-        }
-    }
-
-    private func applyNewFrame(_ newFrame: CGRect, for hostingController: UIHostingController<AnyView>, animated: Bool) {
+        guard let hc = hostingController else { return }
+        let frame = fullEdgeFrame()
         if animated {
             UIView.animate(
-                withDuration: Constants.standardAnimationDuration,
+                withDuration: Constants.springResponse,
                 delay: 0,
-                usingSpringWithDamping: Constants.standardSpringDamping,
-                initialSpringVelocity: Constants.standardSpringVelocity,
+                usingSpringWithDamping: Constants.springDamping,
+                initialSpringVelocity: 0.3,
                 options: .curveEaseOut
-            ) {
-                hostingController.view.frame = newFrame
-            }
+            ) { hc.view.frame = frame }
         } else {
-            hostingController.view.frame = newFrame
+            hc.view.frame = frame
         }
     }
-    
+
+    // MARK: - Show / Hide dock (the whole overlay)
+    @objc public func showDock() {
+        guard isDockEnabled() else { return }
+        guard !isVisible, let hc = hostingController else { return }
+
+        DispatchQueue.main.async {
+            self.isVisible = true
+            if hc.view.superview == nil {
+                self.keyWindow?.addSubview(hc.view)
+            }
+            hc.view.frame = self.fullEdgeFrame()
+            hc.view.alpha = 0
+            UIView.animate(withDuration: Constants.springResponse) {
+                hc.view.alpha = 1
+            }
+        }
+    }
+
+    @objc public func hideDock() {
+        guard isVisible, let hc = hostingController else { return }
+        DispatchQueue.main.async {
+            UIView.animate(withDuration: Constants.springResponse) {
+                hc.view.alpha = 0
+            } completion: { _ in
+                self.isVisible = false
+                self.isDockOpen = false
+            }
+        }
+    }
+
+    // MARK: - Open / Close panel
+    @objc public func openDockPanel() {
+        guard !isDockOpen else { return }
+        withMainAnimation { self.isDockOpen = true }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+    }
+
+    @objc public func closeDockPanel() {
+        guard isDockOpen else { return }
+        withMainAnimation { self.isDockOpen = false }
+    }
+
+    @objc public func toggleDockPanel() {
+        isDockOpen ? closeDockPanel() : openDockPanel()
+    }
+
+    // MARK: - App management
     @objc public func addRunningApp(_ appName: String, appUUID: String, view: UIView?) {
         let appInfo = AppInfoProvider.shared.findAppInfo(appName: appName, dataUUID: appUUID)
         addRunningAppWithInfo(appInfo, appUUID: appUUID, view: view)
     }
-    
+
+    @objc public func addRunningAppWithInfo(_ appInfo: LCAppInfo?, appUUID: String, view: UIView?) {
+        guard isDockEnabled() else { return }
+        guard !apps.contains(where: { $0.appUUID == appUUID }) else { return }
+
+        let appName = appInfo?.displayName() ?? "Unknown App"
+        let appModel = DockAppModel(appName: appName, appUUID: appUUID, appInfo: appInfo, view: view)
+
+        DispatchQueue.main.async {
+            self.apps.append(appModel)
+            if self.apps.count == 1 {
+                self.showDock()
+            }
+        }
+    }
+
     @objc public func removeRunningApp(_ appUUID: String) {
         guard isDockEnabled() else { return }
-        
         DispatchQueue.main.async {
             self.apps.removeAll { $0.appUUID == appUUID }
-            
-            if self.apps.isEmpty {
-                self.hideDock()
-            } else if self.isVisible {
-                self.updateDockFrame()
-            }
+            if self.apps.isEmpty { self.hideDock() }
         }
     }
-    
-    // 수정: 독을 오른쪽 변 전체로 수
-    @objc public func showDock() {
-        guard isDockEnabled() else { return }
-        guard !isVisible, let hostingController = hostingController else { return }
-        guard let keyWindow = self.keyWindow else { return }
-        
+
+    // MARK: - Minimize
+    @objc public func minimizeAllWindows(except: DecoratedAppSceneViewController? = nil) {
         DispatchQueue.main.async {
-            self.isVisible = true
-            let screen = keyWindow.bounds
-            
-            if hostingController.view.superview == nil {
-                keyWindow.addSubview(hostingController.view)
-            }
-            
-            // [수정] 독 윈도우 프레임을 오른쪽 변 세로 전체(screen.height)로 설정
-            // 가로폭(width)은 제스처 수신을 위해 60pt 정도로 넉넉히 잡습니다.
-            hostingController.view.frame = CGRect(
-                x: screen.width - 60, 
-                y: 0, 
-                width: 60, 
-                height: screen.height
-            )
-            hostingController.view.backgroundColor = .clear 
-            
-            self.setupEdgeGestureRecognizers()
-            
-            // 시각적으로 독이 나타나게 설정
-            hostingController.view.alpha = 1
-            withAnimation(.spring()) {
-                self.isDockHidden = false
-            }
-        }
-    }
-    
-    @objc public func hideDock() {
-        guard isVisible, let hostingController = hostingController else { return }
-        
-        DispatchQueue.main.async {
-            UIView.animate(
-                withDuration: Constants.standardAnimationDuration,
-                delay: 0,
-                usingSpringWithDamping: Constants.showHideSpringDamping,
-                initialSpringVelocity: Constants.showHideSpringVelocity,
-                options: .curveEaseOut
-            ) {
-                hostingController.view.alpha = 0
-                let finalScale = Constants.initialScale
-                hostingController.view.transform = CGAffineTransform(scaleX: finalScale, y: finalScale)
-                // Move off-screen to hide, but keep in view hierarchy
-                let screenBounds = self.keyWindow!.bounds
-                let currentDockWidth = self.dockWidth
-                let targetX = self.calculateTargetX(isDockHidden: true, isOnRightSide: hostingController.view.frame.midX > screenBounds.width / 2, dockWidth: currentDockWidth, screenWidth: screenBounds.width)
-                let targetY = hostingController.view.frame.origin.y // Keep current Y
-                hostingController.view.frame.origin = CGPoint(x: targetX, y: targetY)
-            } completion: { _ in
-                self.isVisible = false
-                hostingController.view.transform = .identity
+            self.apps.forEach { app in
+                if let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController, vc != except {
+                    app.view?.layer.removeAllAnimations()
+                    vc.minimizeWindow()
+                }
             }
         }
     }
 
-    @objc public func animateFrame(to finalFrame: CGRect) {
-        guard let hostingController = self.hostingController else { return }
-        
-        UIView.animate(
-            withDuration: Constants.standardAnimationDuration,
-            delay: 0,
-            usingSpringWithDamping: Constants.standardSpringDamping,
-            initialSpringVelocity: Constants.standardSpringVelocity,
-            options: .curveEaseOut
-        ) {
-            hostingController.view.frame = finalFrame
-        }
-    }
-
-    @objc public func updateFrameAfterAnimation(finalOffset: CGSize) {
-        guard let hostingController = self.hostingController else { return }
-        
-        let newFrame = hostingController.view.frame.offsetBy(dx: finalOffset.width, dy: finalOffset.height)
-        
-        hostingController.view.frame = newFrame
-    }
-
-    func handleSwipeToHideOrShowGesture(for originalFrame: CGRect, translation: CGSize) -> Bool {
-        let screenWidth = keyWindow!.bounds.width
-        let isOnRightSide = originalFrame.origin.x > screenWidth / 2
-        let isSwipingAway = (isOnRightSide && translation.width > 0) || (!isOnRightSide && translation.width < 0)
-        
-        if isSwipingAway {
-            guard !self.isDockHidden else { return false }
-            self.hideDockToSide()
-            let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
-            impactFeedback.impactOccurred()
-            return true
-        } else {
-            guard self.isDockHidden else { return false }
-            self.showDockFromHidden()
-            let impactFeedback = UIImpactFeedbackGenerator(style: .light)
-            impactFeedback.impactOccurred()
-            return true
-        }
-    }
-    
-    // Check if gesture is for cross-screen movement (left to right or vice versa)
-    func isPositionChangeGesture(for originalFrame: CGRect, translation: CGSize) -> Bool {
-        let horizontalDistance = abs(translation.width)
-        let verticalDistance = abs(translation.height)
-        
-        guard !self.isDockHidden, horizontalDistance > verticalDistance else {
-            return false
-        }
-        
-        let screenWidth = keyWindow!.bounds.width
-        let isOnRightSide = originalFrame.origin.x > screenWidth / 2
-        
-        guard !self.isDockHidden else { return false }
-        
-        let isMovingToOtherSide = (isOnRightSide && translation.width < 0) || (!isOnRightSide && translation.width > 0)
-        guard isMovingToOtherSide else { return false }
-        
-        let draggedX = originalFrame.origin.x + translation.width
-        let screenCenter = screenWidth / 2
-        
-        if isOnRightSide {
-            return draggedX < screenCenter
-        } else {
-            return (draggedX + originalFrame.width) > screenCenter
-        }
-    }
-    
-    // Find and bring corresponding multitask view to front
+    // MARK: - Bring to front
     func bringMultitaskViewToFront(uuid: String, from center: CGPoint? = nil) -> Bool {
-        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene else {
-            return false
-        }
-
+        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return false }
         for window in windowScene.windows {
-            if let targetView = findMultitaskView(in: window, withUUID: uuid) {
+            if let targetView = apps.first(where: { $0.appUUID == uuid })?.view {
                 passURLSchemeToView(targetView)
                 animateViewAppearance(targetView, from: center, in: window)
                 return true
             }
         }
-        
         return false
     }
 
@@ -589,19 +373,18 @@ class AppInfoProvider {
         let isHidden = view.isHidden || view.alpha < 0.1
         let decoratedVC = view._viewDelegate() as? DecoratedAppSceneViewController
         let isMaximized = decoratedVC?.isMaximized ?? false
-        
-        // when a fullscreen multitask app is brought to front, optionally hide other windows
+
         if UserDefaults.lcShared().bool(forKey: "LCMaxOneAppOnStage") && isMaximized {
             MultitaskDockManager.shared.minimizeAllWindows(except: decoratedVC)
         }
-        
+
         if isHidden {
             view.layer.removeAllAnimations()
             view.isHidden = true
             view.transform = .identity
             let origFrame = view.frame
             let pipManager = PiPManager.shared!
-            if let decoratedVC = view._viewDelegate(), pipManager.isPiP(withDecoratedVC: decoratedVC) {
+            if let vc = view._viewDelegate(), pipManager.isPiP(withDecoratedVC: vc) {
                 pipManager.stopPiP()
             } else {
                 view.transform = CGAffineTransform(scaleX: 0.1, y: 0.1)
@@ -610,28 +393,24 @@ class AppInfoProvider {
                 view.frame.size = CGSize(width: smaller, height: smaller)
                 if let center { view.center = center }
             }
-            
-            self.bringViewToFront(view, in: window)
+            bringViewToFront(view, in: window)
             UIView.animate(
-                withDuration: Constants.standardAnimationDuration,
+                withDuration: Constants.springResponse,
                 delay: 0,
                 usingSpringWithDamping: 1.0,
                 initialSpringVelocity: 0,
-                options: .curveEaseInOut,
-                animations: {
-                    view.alpha = 1.0
-                    view.transform = .identity
-                    view.frame = origFrame
-                }
-            )
+                options: .curveEaseInOut
+            ) {
+                view.alpha = 1.0
+                view.transform = .identity
+                view.frame = origFrame
+            }
         } else {
             bringViewToFront(view, in: window)
-            
-            UIView.animate(withDuration: Constants.shortAnimationDuration1, animations: {
-                let scale = Constants.bringToFrontScale
-                view.transform = CGAffineTransform(scaleX: scale, y: scale)
-            }) { _ in
-                UIView.animate(withDuration: Constants.shortAnimationDuration2) {
+            UIView.animate(withDuration: Constants.shortAnimDuration) {
+                view.transform = CGAffineTransform(scaleX: Constants.bringToFrontScale, y: Constants.bringToFrontScale)
+            } completion: { _ in
+                UIView.animate(withDuration: Constants.shortAnimDuration2) {
                     view.transform = .identity
                 }
             }
@@ -639,431 +418,263 @@ class AppInfoProvider {
     }
 
     private func bringViewToFront(_ view: UIView, in window: UIWindow) {
-        if let superview = view.superview {
-            superview.bringSubviewToFront(view)
-        }
-        if let windowSuperview = window.superview {
-            windowSuperview.bringSubviewToFront(window)
-        }
+        view.superview?.bringSubviewToFront(view)
+        window.superview?.bringSubviewToFront(window)
     }
-    
-    // Recursively find multitask view
-    private func findMultitaskView(in view: UIView, withUUID uuid: String) -> UIView? {
-        apps.first { $0.appUUID == uuid }?.view
-    }
-    
-    // Get view's dataUUID property through reflection
-    private func getDataUUID(from view: UIView) -> String? {
-        let mirror = Mirror(reflecting: view)
-        
-        if let child = (mirror.children.first { $0.label == "dataUUID" })?.value as? String {
-            return child
-        }
-        
-        if view.responds(to: NSSelectorFromString("dataUUID")) {
-            return view.value(forKey: "dataUUID") as? String
-        }
-        
-        return nil
-    }
-    
-    @objc public func addRunningAppWithInfo(_ appInfo: LCAppInfo?, appUUID: String, view: UIView?) {
-        guard isDockEnabled() else { return }
-        
-        if apps.contains(where: { $0.appUUID == appUUID }) {
-            return
-        }
-        
-        let appName = appInfo?.displayName() ?? "Unknown App"
-        let appModel = DockAppModel(appName: appName, appUUID: appUUID, appInfo: appInfo, view: view)
-        
-        DispatchQueue.main.async {
-            self.apps.append(appModel)
-            
-            if self.apps.count == 1 {
-                self.showDock()
-            } else if self.isVisible {
-                self.updateDockFrame()
-            }
-        }
-    }
-    
-    @objc public func minimizeAllWindows(except: DecoratedAppSceneViewController? = nil) {
-        DispatchQueue.main.async {
-            self.apps.forEach { app in
-                if let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController,
-                   vc != except {
-                    app.view?.layer.removeAllAnimations()
-                    vc.minimizeWindow()
-                }
-            }
-        }
-    }
-    
+
+    // MARK: - Collapse (kept for compatibility)
     @objc public func toggleDockCollapse() {
         DispatchQueue.main.async {
             self.isCollapsed.toggle()
-            self.updateDockFrame()
             self.notifyDockCollapseChanged()
         }
     }
-    
+
     @objc public func notifyDockCollapseChanged() {
-        self.updateDockFrame()
-        // find fullscreen apps and hide its UINavigationBar
         self.apps.forEach { app in
             if let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController, vc.isMaximized {
                 vc.updateVerticalConstraints()
             }
         }
     }
-    
-    // Toggle dock hide/show state
-    @objc public func toggleDockVisibility() {
-        DispatchQueue.main.async {
-            self.isDockHidden.toggle()
-            self.updateDockFrame()
-        }
-    }
-    
-    @objc public func showDockFromHidden() {
-        DispatchQueue.main.async {
-            self.isDockHidden = false
-            self.updateDockFrame()
-            self.setupEdgeGestureRecognizers()
-        }
-    }
-    
-    @objc public func hideDockToSide() {
-        DispatchQueue.main.async {
-            self.isDockHidden = true
-            self.updateDockFrame()
-            self.setupEdgeGestureRecognizers()
-        }
-    }
-    
-    // 수정: 멀티테스크 오른쪽 변에 제스처 변경
-    private func setupEdgeGestureRecognizers() {
-        // 1. 독의 도화지(hostingController의 뷰)가 있는지 확인
-        guard let dockView = hostingController?.view else { return }
 
-        // 2. 독 뷰에 붙은 기존 제스처 청소
-        dockView.gestureRecognizers?.removeAll { gesture in
-            return gesture is UIScreenEdgePanGestureRecognizer
-        }
-        
-        // 3. 이제 최상위 레이어인 '독 뷰' 자체에 제스처를 등록합니다.
-        // 이렇게 하면 밑에 어떤 앱이 실행 중이어도 제스처를 100% 낚아챕니다.
-        let rightEdgeGesture = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(handleEdgeSwipe(_:)))
-        rightEdgeGesture.edges = .right
-        
-        // 앱 내부의 터치를 방해하지 않도록 설정
-        rightEdgeGesture.cancelsTouchesInView = false 
-        
-        dockView.addGestureRecognizer(rightEdgeGesture)
-    }
-
-
-    // 수정: 멀티테스크 제스쳐 동작 시간
-    @objc private func handleEdgeSwipe(_ gesture: UIScreenEdgePanGestureRecognizer) {
-        let translation = gesture.translation(in: gesture.view)
-        let velocity = gesture.velocity(in: gesture.view).x
-        
-        switch gesture.state {
-        case .began:
-            self.gestureStartTime = Date()
-            self.hasTriggeredDock = false
-            
-        case .changed:
-            // 독이 손가락을 따라 이동하지 않도록 위치 업데이트 코드는 넣지 않습니다.
-            if let startTime = self.gestureStartTime, !hasTriggeredDock {
-                let duration = Date().timeIntervalSince(startTime)
-                
-                // 0.3초 이상 멈췄을 때만 독을 표시 (isDockHidden 변경)
-                if duration > 0.3 && abs(translation.x) > 30 {
-                    self.hasTriggeredDock = true
-                    withAnimation(.spring()) {
-                        self.isDockHidden = false 
-                    }
-                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                }
+    // MARK: - Helpers
+    private func withMainAnimation(_ block: @escaping () -> Void) {
+        DispatchQueue.main.async {
+            withAnimation(.spring(response: Constants.springResponse, dampingFraction: Constants.springDamping)) {
+                block()
             }
-            
-        case .ended:
-            // 홀드(독 표시)가 발생하지 않았고, 왼쪽으로 빠르게 던졌을 때만 최소화
-            if !hasTriggeredDock && velocity < -500 {
-                self.minimizeAllWindows() 
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            }
-            
-            self.gestureStartTime = nil
-            self.hasTriggeredDock = false
-            
-        default:
-            self.gestureStartTime = nil
-            self.hasTriggeredDock = false
         }
     }
 
-    
-    // MARK: - Multitask Mode Check
     private func isDockEnabled() -> Bool {
-        let multitaskMode = MultitaskMode(rawValue: LCUtils.appGroupUserDefault.integer(forKey: "LCMultitaskMode")) ?? .virtualWindow
-        return multitaskMode == .virtualWindow
+        let mode = MultitaskMode(rawValue: LCUtils.appGroupUserDefault.integer(forKey: "LCMultitaskMode")) ?? .virtualWindow
+        return mode == .virtualWindow
     }
 }
 
-// MARK: - SwiftUI Dock View
+// MARK: - Root Dock SwiftUI View
+/// This view fills the hosting controller frame (handleWidth + dockPanelWidth × full height).
+/// The handle strip is always visible on the right edge.
+/// The panel slides in from the right over the handle when isDockOpen == true.
 @available(iOS 16.0, *)
 public struct MultitaskDockSwiftView: View {
     @EnvironmentObject var dockManager: MultitaskDockManager
-    @State private var dragOffset = CGSize.zero
-    @State private var isMoving: Bool = false
-    @AppStorage("LCHideCollapsedDock", store: LCUtils.appGroupUserDefault) var hideCollapsedDock: Bool = false
-    
-    // Calculate dynamic padding based on user settings
-    private var dynamicPadding: CGFloat {
-        let basePadding: CGFloat = 4
-        let extraPadding = (dockManager.dockWidth - MultitaskDockManager.Constants.defaultDockWidth) * 0.2
-        return max(basePadding, basePadding + extraPadding)
-    }
-    
+
     public var body: some View {
-        GeometryReader { g in
-            VStack(spacing: 8) {
-                if dockManager.isCollapsed {
-                    CollapsedDockView(isHidden: dockManager.isDockHidden)
-                        .onTapGesture {
-                            dockManager.toggleDockCollapse()
-                        }
-                } else {
-                    VStack(spacing: 8) {
-                        CollapseButtonView()
-                            .onTapGesture {
-                                dockManager.toggleDockCollapse()
-                            }
-                        
-                        MinimizeAllButtonView()
-                            .onTapGesture {
-                                dockManager.minimizeAllWindows()
-                            }
-                        
-                        ForEach(dockManager.apps) { app in
-                            AppIconView(app: app)
-                        }
-                    }
+        GeometryReader { geo in
+            ZStack(alignment: .trailing) {
+                // Invisible full-area tap-outside-to-close layer (only active when open)
+                if dockManager.isDockOpen {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { dockManager.closeDockPanel() }
+                }
+
+                HStack(spacing: 0) {
+                    Spacer()
+
+                    // The sliding dock panel
+                    DockPanelView()
+                        .frame(width: MultitaskDockManager.Constants.dockPanelWidth)
+                        .offset(x: dockManager.isDockOpen ? 0 : MultitaskDockManager.Constants.dockPanelWidth)
+
+                    // Always-visible edge handle
+                    EdgeHandleView()
+                        .frame(width: MultitaskDockManager.Constants.handleWidth, height: geo.size.height)
                 }
             }
-            .padding(dynamicPadding)
-            .modifier { content in
-                if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
-                    content.glassEffect(.regular, in: .rect(cornerRadius: 15))
-                } else {
-                    content.background(
-                        RoundedRectangle(cornerRadius: 15)
-                            .fill(Color.black.opacity(dockManager.isDockHidden ? 0.3 : 0.7))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 15)
-                                    .stroke(Color.white.opacity(dockManager.isDockHidden ? 0.1 : 0.3), lineWidth: 1)
-                            )
-                    )
-                }
-            }
-            .scaleEffect(dockManager.isVisible ? 1.0 : 0.8)
-            .opacity(dockManager.isDockHidden ? (hideCollapsedDock && dockManager.isCollapsed ? 0.01 : 0.4) : 1.0)
-            .offset(dragOffset)
-            .position(x: g.size.width / 2, y: g.size.height / 2)
         }
-
-
-
         .ignoresSafeArea()
-        .gesture(
-            DragGesture(minimumDistance: 5)
-            .onChanged { value in
-                self.isMoving = true
-                self.dragOffset = value.translation
-            }
-            .onEnded { value in
-                self.isMoving = true
-
-                let hcFrame = dockManager.hostingController?.view.frame ?? .zero
-                
-                let currentPhysicalFrame = hcFrame.offsetBy(dx: self.dragOffset.width, dy: self.dragOffset.height)
-                
-                if dockManager.isPositionChangeGesture(for: hcFrame, translation: value.translation) {
-                    let screenBounds = dockManager.keyWindow!.bounds
-                    let targetX = dockManager.calculateTargetX(isDockHidden: false, isOnRightSide: currentPhysicalFrame.midX > screenBounds.width / 2, dockWidth: dockManager.dockWidth, screenWidth: screenBounds.width)
-                    
-                    let safeAreaInsets = dockManager.safeAreaInsets
-                    let dockVerticalMargin = MultitaskDockManager.Constants.dockVerticalMargin
-                    let minY = safeAreaInsets.top + dockVerticalMargin
-                    let maxY = screenBounds.height - safeAreaInsets.bottom - currentPhysicalFrame.height - dockVerticalMargin
-                    let targetY = max(minY, min(maxY, currentPhysicalFrame.origin.y))
-                    
-                    let finalPhysicalPosition = CGPoint(x: targetX, y: targetY)
-                    
-                    let newOffset = CGSize(
-                        width: finalPhysicalPosition.x - hcFrame.origin.x,
-                        height: finalPhysicalPosition.y - hcFrame.origin.y
-                    )
-                    
-                    let animationDuration = MultitaskDockManager.Constants.longAnimationDuration
-                    
-                    withAnimation(.spring(response: animationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping)) {
-                        self.dragOffset = newOffset
-                    }
-                    
-                    DispatchQueue.main.asyncAfter(deadline: .now() + animationDuration) {
-                        dockManager.updateFrameAfterAnimation(finalOffset: newOffset)
-                        
-                        self.dragOffset = .zero
-                        
-                        self.isMoving = false
-                    }
-                    return
-                }
-                
-                if dockManager.handleSwipeToHideOrShowGesture(for: hcFrame, translation: value.translation) {
-                    withAnimation(.spring(response: MultitaskDockManager.Constants.longAnimationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping)) {
-                        self.dragOffset = .zero
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + MultitaskDockManager.Constants.longAnimationDuration) {
-                        self.isMoving = false
-                    }
-                    return
-                }
-                
-                let screenBounds = dockManager.keyWindow!.bounds
-                let safeAreaInsets = dockManager.safeAreaInsets
-                let dockVerticalMargin = MultitaskDockManager.Constants.dockVerticalMargin
-                let minY = safeAreaInsets.top + dockVerticalMargin
-                let maxY = screenBounds.height - safeAreaInsets.bottom - currentPhysicalFrame.height - dockVerticalMargin
-                let targetY = max(minY, min(maxY, currentPhysicalFrame.origin.y))
-                
-                let targetX: CGFloat
-
-                let isOnRightSide = hcFrame.origin.x > screenBounds.width / 2
-                targetX = dockManager.calculateTargetX(isDockHidden: dockManager.isDockHidden, isOnRightSide: isOnRightSide, dockWidth: currentPhysicalFrame.width, screenWidth: screenBounds.width)
-                
-                let finalPhysicalPosition = CGPoint(x: targetX, y: targetY)
-                
-                let newOffset = CGSize(
-                    width: finalPhysicalPosition.x - hcFrame.origin.x,
-                    height: finalPhysicalPosition.y - hcFrame.origin.y
-                )
-                
-                let animationDuration = MultitaskDockManager.Constants.longAnimationDuration
-                
-                withAnimation(.spring(response: animationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping)) {
-                    self.dragOffset = newOffset
-                }
-                
-                DispatchQueue.main.asyncAfter(deadline: .now() + animationDuration) {
-                    dockManager.updateFrameAfterAnimation(finalOffset: newOffset)
-                    
-                    self.dragOffset = .zero
-                    
-                    self.isMoving = false
-                }
-            }
+        .animation(
+            .spring(
+                response: MultitaskDockManager.Constants.springResponse,
+                dampingFraction: MultitaskDockManager.Constants.springDamping
+            ),
+            value: dockManager.isDockOpen
         )
-        .animation(.spring(response: MultitaskDockManager.Constants.standardAnimationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping), value: dockManager.isCollapsed)
-        .animation(.spring(response: MultitaskDockManager.Constants.standardAnimationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping), value: dockManager.isDockHidden)
-        .animation(.spring(response: MultitaskDockManager.Constants.longAnimationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping), value: dockManager.dockWidth)
-        .animation(.spring(response: MultitaskDockManager.Constants.longAnimationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping), value: dockManager.settingsChanged)
     }
-    
+
     public init() {}
 }
 
-// MARK: - Collapsed Dock View
+// MARK: - Edge Handle View
+/// Thin strip on the right edge. Receives all gestures:
+///   - Short upward swipe  → minimize frontmost app
+///   - Long press OR leftward drag past threshold → open dock panel
 @available(iOS 16.0, *)
-struct CollapsedDockView: View {
-    let isHidden: Bool
+struct EdgeHandleView: View {
     @EnvironmentObject var dockManager: MultitaskDockManager
-    
+
+    /// Tracks whether a long-press fired so we don't double-trigger
+    @State private var longPressFired = false
+    /// Tracks live drag translation for the pill animation
+    @State private var dragTranslation: CGSize = .zero
+
+    // Pill visual feedback: compress vertically while dragging up
+    private var pillScale: CGSize {
+        let upDrag = max(0, -dragTranslation.height)
+        let compress = max(0.6, 1.0 - upDrag / 200)
+        return CGSize(width: 1.0, height: compress)
+    }
+
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(
-                    LinearGradient(
-                        gradient: Gradient(colors: [
-                            Color.blue.opacity(isHidden ? 0.4 : 0.8),
-                            Color.blue.opacity(isHidden ? 0.3 : 0.6)
-                        ]),
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .frame(width: dockManager.adaptiveIconSize, height: dockManager.adaptiveIconSize)
-            
-            Group {
-                if isHidden {
-                    Image(systemName: "eye.slash")
-                        .foregroundColor(.white.opacity(0.8))
-                        .font(.system(size: dockManager.adaptiveIconSize * 0.35, weight: .bold))
-                } else {
-                    Image(systemName: "chevron.up")
-                        .foregroundColor(.white)
-                        .font(.system(size: dockManager.adaptiveIconSize * 0.4, weight: .bold))
-                }
+            // Subtle background
+            Rectangle()
+                .fill(Color.white.opacity(0.08))
+
+            // Pill indicator (like iOS home bar)
+            RoundedRectangle(cornerRadius: 3)
+                .fill(Color.white.opacity(0.5))
+                .frame(width: 4, height: 44)
+                .scaleEffect(x: pillScale.width, y: pillScale.height, anchor: .bottom)
+                .animation(.interactiveSpring(), value: dragTranslation)
+        }
+        .contentShape(Rectangle())
+        .gesture(
+            SimultaneousGesture(
+                // Long-press to open dock
+                LongPressGesture(minimumDuration: MultitaskDockManager.Constants.longPressDuration)
+                    .onEnded { _ in
+                        longPressFired = true
+                        dockManager.openDockPanel()
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    },
+
+                // Drag for minimize (up) or open dock (left)
+                DragGesture(minimumDistance: 8, coordinateSpace: .global)
+                    .onChanged { value in
+                        dragTranslation = value.translation
+                    }
+                    .onEnded { value in
+                        defer {
+                            dragTranslation = .zero
+                            longPressFired = false
+                        }
+                        guard !longPressFired else { return }
+
+                        let dx = value.translation.width   // negative = leftward (into screen)
+                        let dy = value.translation.height  // negative = upward
+
+                        let isUpward  = dy < -MultitaskDockManager.Constants.minimizeThreshold
+                        let isLeftward = dx < -MultitaskDockManager.Constants.openDockThreshold
+
+                        if isUpward && !isLeftward {
+                            // Short upward swipe → minimize frontmost app
+                            let frontVC = frontmostDecoratedVC()
+                            if let vc = frontVC {
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                vc.minimizeWindow()
+                            } else {
+                                // fallback: minimize all
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                dockManager.minimizeAllWindows()
+                            }
+                        } else if isLeftward {
+                            // Leftward pull → open dock
+                            dockManager.openDockPanel()
+                        }
+                    }
+            )
+        )
+    }
+
+    /// Returns the DecoratedAppSceneViewController whose window is currently
+    /// frontmost (highest z-order, visible, not minimized).
+    private func frontmostDecoratedVC() -> DecoratedAppSceneViewController? {
+        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return nil }
+        // Walk windows in reverse z-order; pick first non-hidden, non-minimized decorated VC
+        let candidates = dockManager.apps.compactMap { app -> (UIView, DecoratedAppSceneViewController)? in
+            guard let view = app.view,
+                  let vc = view._viewDelegate() as? DecoratedAppSceneViewController,
+                  !view.isHidden, view.alpha > 0.1 else { return nil }
+            return (view, vc)
+        }
+        // Prefer the one whose superview has the highest subview index
+        return candidates.max(by: { a, b in
+            let ia = a.0.superview?.subviews.firstIndex(of: a.0) ?? 0
+            let ib = b.0.superview?.subviews.firstIndex(of: b.0) ?? 0
+            return ia < ib
+        })?.1
+    }
+}
+
+// MARK: - Dock Panel View
+/// The actual app list panel that slides in from the right.
+@available(iOS 16.0, *)
+struct DockPanelView: View {
+    @EnvironmentObject var dockManager: MultitaskDockManager
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Text("Apps")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.white.opacity(0.7))
+                Spacer()
+                // Close handle
+                Image(systemName: "chevron.right")
+                    .foregroundColor(.white.opacity(0.5))
+                    .font(.caption)
             }
-            .shadow(color: .black.opacity(0.3), radius: 1, x: 0, y: 1)
-        }
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.white.opacity(isHidden ? 0.2 : 0.3), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.3), radius: 3, x: 0, y: 2)
-        .scaleEffect(isHidden ? 0.9 : 1.0)
-        .animation(.easeInOut(duration: 0.2), value: isHidden)
-        .animation(.spring(response: MultitaskDockManager.Constants.longAnimationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping), value: dockManager.adaptiveIconSize)
-    }
-}
+            .padding(.horizontal, 10)
+            .padding(.top, 16)
+            .padding(.bottom, 8)
 
-// MARK: - Collapse Button View
-@available(iOS 16.0, *)
-struct CollapseButtonView: View {
-    @EnvironmentObject var dockManager: MultitaskDockManager
-    
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 8)  
-                .fill(Color.gray.opacity(0.8))
-                .frame(width: dockManager.adaptiveIconSize, height: dockManager.adaptiveIconSize)
-            
-            Image(systemName: "chevron.down")
-                .foregroundColor(.white)
-                .font(.system(size: dockManager.adaptiveIconSize * 0.4, weight: .semibold))
-        }
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)  
-                .stroke(Color.white.opacity(0.2), lineWidth: 1)
-        )
-        .animation(.spring(response: MultitaskDockManager.Constants.longAnimationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping), value: dockManager.adaptiveIconSize)
-    }
-}
+            Divider().background(Color.white.opacity(0.2))
 
-// MARK: - Minimize All Button View
-@available(iOS 16.0, *)
-struct MinimizeAllButtonView: View {
-    @EnvironmentObject var dockManager: MultitaskDockManager
-    
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color.gray.opacity(0.8))
-                .frame(width: dockManager.adaptiveIconSize, height: dockManager.adaptiveIconSize)
-            
-            Image(systemName: "rectangle.stack.badge.minus")
-                .foregroundColor(.white)
-                .font(.system(size: dockManager.adaptiveIconSize * 0.4, weight: .semibold))
+            // Scrollable app list
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: MultitaskDockManager.Constants.iconSpacing) {
+                    ForEach(dockManager.apps) { app in
+                        AppIconView(app: app)
+                            .onTapGesture {
+                                dockManager.closeDockPanel()
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                                    let _ = dockManager.bringMultitaskViewToFront(uuid: app.appUUID)
+                                }
+                            }
+                    }
+                }
+                .padding(.vertical, MultitaskDockManager.Constants.panelVerticalPadding)
+                .padding(.horizontal, 8)
+            }
+
+            Divider().background(Color.white.opacity(0.2))
+
+            // Minimize-all button
+            Button {
+                dockManager.closeDockPanel()
+                dockManager.minimizeAllWindows()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "rectangle.stack.badge.minus")
+                        .font(.caption)
+                    Text("Minimize All")
+                        .font(.caption)
+                }
+                .foregroundColor(.white.opacity(0.7))
+                .padding(.vertical, 12)
+            }
         }
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.white.opacity(0.2), lineWidth: 1)
-        )
+        .modifier { content in
+            if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+                content.glassEffect(.regular, in: .rect(cornerRadius: 0))
+            } else {
+                content.background(
+                    Rectangle()
+                        .fill(Color.black.opacity(0.75))
+                        .overlay(
+                            Rectangle()
+                                .fill(Color.white.opacity(0.08))
+                        )
+                )
+            }
+        }
+        .shadow(color: .black.opacity(0.4), radius: 12, x: -4, y: 0)
     }
 }
 
@@ -1072,27 +683,22 @@ class IconCacheManager {
     static let shared = IconCacheManager()
     private var cache: [String: UIImage] = [:]
     private let cacheQueue = DispatchQueue(label: "icon.cache.queue", attributes: .concurrent)
-    
+
     private init() {}
-    
+
     func getIcon(for key: String) -> UIImage? {
-        return cacheQueue.sync {
-            return cache[key]
-        }
+        cacheQueue.sync { cache[key] }
     }
-    
+
     func setIcon(_ icon: UIImage, for key: String) {
-        cacheQueue.async(flags: .barrier) {
-            self.cache[key] = icon
-        }
+        cacheQueue.async(flags: .barrier) { self.cache[key] = icon }
     }
-    
+
     func clearCache() {
-        cacheQueue.async(flags: .barrier) {
-            self.cache.removeAll()
-        }
+        cacheQueue.async(flags: .barrier) { self.cache.removeAll() }
     }
 }
+
 // MARK: - App Icon View
 @available(iOS 16.0, *)
 struct AppIconView: View {
@@ -1102,64 +708,56 @@ struct AppIconView: View {
     @State private var isLoading = true
     @EnvironmentObject var dockManager: MultitaskDockManager
     @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) var darkModeIcon = false
-    
-    private var iconSize: CGFloat {
-        return dockManager.adaptiveIconSize
-    }
-    
+
+    private var iconSize: CGFloat { MultitaskDockManager.Constants.iconSize }
+
     var body: some View {
-        Group {
-            if isLoading && appIcon == nil {
-                LoadingIconView()
-            } else if let icon = appIcon {
-                IconImageView(icon: icon)
-            } else {
-                RoundedRectangle(cornerRadius: 16)
-                .fill(Color.gray.opacity(0.3))
+        VStack(spacing: 4) {
+            Group {
+                if isLoading && appIcon == nil {
+                    LoadingIconView()
+                } else if let icon = appIcon {
+                    IconImageView(icon: icon)
+                } else {
+                    RoundedRectangle(cornerRadius: 14)
+                        .fill(Color.gray.opacity(0.3))
+                }
             }
+            .frame(width: iconSize, height: iconSize)
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .shadow(color: .black.opacity(0.3), radius: 4, x: 0, y: 3)
+            .scaleEffect(isPressed ? 0.9 : 1.0)
+            .animation(.easeInOut(duration: 0.1), value: isPressed)
+
+            Text(app.appName)
+                .font(.system(size: 9))
+                .foregroundColor(.white.opacity(0.75))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(width: iconSize)
         }
-        .frame(width: iconSize, height: iconSize)
-        .shadow(color: .black.opacity(0.3), radius: 4, x: 0, y: 3)
-        .scaleEffect(isPressed ? 1.15 : 1.0)
-        .animation(.easeInOut(duration: 0.1), value: isPressed)
-        .animation(.easeInOut(duration: MultitaskDockManager.Constants.standardAnimationDuration), value: dockManager.settingsChanged)
-        .onAppear {
-            loadAppIcon()
-        }
+        .onAppear { loadAppIcon() }
         .onPressGesture(
-            onPress: { 
-                isPressed = true
-            },
-            onRelease: { location in 
-                isPressed = false
-                let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
-                impactFeedback.impactOccurred()
-                let _ = dockManager.bringMultitaskViewToFront(uuid: app.appUUID, from: location)
-            }
+            onPress: { isPressed = true },
+            onRelease: { _ in isPressed = false }
         )
         .contentShape(Rectangle())
     }
-    
+
     private func loadAppIcon() {
         let cacheKey = "\(app.appName)_\(app.appUUID)"
-        
-        if let cachedIcon = IconCacheManager.shared.getIcon(for: cacheKey) {
-            self.appIcon = cachedIcon
-            self.isLoading = false
+        if let cached = IconCacheManager.shared.getIcon(for: cacheKey) {
+            appIcon = cached
+            isLoading = false
             return
         }
-        
         DispatchQueue.global(qos: .userInitiated).async {
             var finalIcon: UIImage?
-            
             if let appInfo = self.app.appInfo {
                 finalIcon = appInfo.iconIsDarkIcon(darkModeIcon)
-            } else {
-                if let foundAppInfo = AppInfoProvider.shared.findAppInfo(appName: self.app.appName, dataUUID: self.app.appUUID) {
-                    finalIcon = foundAppInfo.iconIsDarkIcon(darkModeIcon)
-                }
+            } else if let found = AppInfoProvider.shared.findAppInfo(appName: self.app.appName, dataUUID: self.app.appUUID) {
+                finalIcon = found.iconIsDarkIcon(darkModeIcon)
             }
-            
             DispatchQueue.main.async {
                 self.isLoading = false
                 if let icon = finalIcon {
@@ -1177,9 +775,7 @@ extension View {
         self.simultaneousGesture(
             DragGesture(minimumDistance: 0, coordinateSpace: .global)
                 .onChanged { value in
-                    if value.translation == CGSize.zero {
-                        onPress()
-                    }
+                    if value.translation == .zero { onPress() }
                 }
                 .onEnded { value in
                     onRelease(value.startLocation)
@@ -1192,9 +788,8 @@ extension View {
 struct LoadingIconView: View {
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 8)
+            RoundedRectangle(cornerRadius: 14)
                 .fill(Color.gray.opacity(0.3))
-            
             ProgressView()
                 .progressViewStyle(CircularProgressViewStyle(tint: .white))
                 .scaleEffect(1.2)
