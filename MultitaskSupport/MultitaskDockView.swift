@@ -472,15 +472,20 @@ public struct MultitaskDockSwiftView: View {
                 }
 
                 HStack(spacing: 0) {
-                    Spacer()
+                    Rectangle().fill(Color.clear)
+                        .contentShape(Rectangle())
+                        .onTapGesture { 
+                            if dockManager.isDockOpen { 
+                                dockManager.closeDockPanel() 
+                            } 
+                        }
+                        .frame(width: geo.size.width - MultitaskDockManager.Constants.dockPanelWidth - MultitaskDockManager.Constants.handleWidth)
 
-                    // The sliding dock panel
                     DockPanelView()
-                        .frame(width: MultitaskDockManager.Constants.dockPanelWidth)
-                        .offset(x: dockManager.isDockOpen ? 0 : MultitaskDockManager.Constants.dockPanelWidth)
+                        .frame(width: MultitaskDockManager.Constants.dockPanelWidth, height: geo.size.height * 0.8)
+                        .offset(x: dockManager.isDockOpen ? 0 : MultitaskDockManager.Constants.dockPanelWidth, y: geo.size.height * 0.1)
                         .allowsHitTesting(dockManager.isDockOpen)
 
-                    // Always-visible edge handle
                     EdgeHandleView()
                         .frame(width: MultitaskDockManager.Constants.handleWidth, height: geo.size.height)
                 }
@@ -713,60 +718,43 @@ struct AppIconView: View {
     private var iconSize: CGFloat { MultitaskDockManager.Constants.iconSize }
 
     var body: some View {
-        VStack(spacing: 4) {
-            Group {
-                if isLoading && appIcon == nil {
-                    LoadingIconView()
-                } else if let icon = appIcon {
-                    IconImageView(icon: icon)
-                } else {
-                    RoundedRectangle(cornerRadius: 14)
-                        .fill(Color.gray.opacity(0.3))
-                }
+        Button {
+            dockManager.closeDockPanel()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                let _ = dockManager.bringMultitaskViewToFront(uuid: app.appUUID)
             }
-            .frame(width: iconSize, height: iconSize)
-            .clipShape(RoundedRectangle(cornerRadius: 14))
-            .shadow(color: .black.opacity(0.3), radius: 4, x: 0, y: 3)
-            .scaleEffect(isPressed ? 0.9 : 1.0)
-            .animation(.easeInOut(duration: 0.1), value: isPressed)
+        } label: {
+            VStack(spacing: 4) {
+                Group {
+                    if isLoading && appIcon == nil {
+                        LoadingIconView()
+                    } else if let icon = appIcon {
+                        IconImageView(icon: icon)
+                    } else {
+                        RoundedRectangle(cornerRadius: 14)
+                            .fill(Color.gray.opacity(0.3))
+                    }
+                }
+                .frame(width: iconSize, height: iconSize)
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+                .shadow(color: .black.opacity(0.3), radius: 4, x: 0, y: 3)
+                .scaleEffect(isPressed ? 0.9 : 1.0)
+                .animation(.easeInOut(duration: 0.1), value: isPressed)
 
-            Text(app.appName)
-                .font(.system(size: 9))
-                .foregroundColor(.white.opacity(0.75))
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(width: iconSize)
+                Text(app.appName)
+                    .font(.system(size: 9))
+                    .foregroundColor(.white.opacity(0.75))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(width: iconSize)
+            }
         }
-        .onAppear { loadAppIcon() }
-        .onPressGesture(
-            onPress: { isPressed = true },
-            onRelease: { _ in isPressed = false }
+        .buttonStyle(PlainButtonStyle())
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in isPressed = true }
+                .onEnded { _ in isPressed = false }
         )
-        .contentShape(Rectangle())
-    }
-
-    private func loadAppIcon() {
-        let cacheKey = "\(app.appName)_\(app.appUUID)"
-        if let cached = IconCacheManager.shared.getIcon(for: cacheKey) {
-            appIcon = cached
-            isLoading = false
-            return
-        }
-        DispatchQueue.global(qos: .userInitiated).async {
-            var finalIcon: UIImage?
-            if let appInfo = self.app.appInfo {
-                finalIcon = appInfo.iconIsDarkIcon(darkModeIcon)
-            } else if let found = AppInfoProvider.shared.findAppInfo(appName: self.app.appName, dataUUID: self.app.appUUID) {
-                finalIcon = found.iconIsDarkIcon(darkModeIcon)
-            }
-            DispatchQueue.main.async {
-                self.isLoading = false
-                if let icon = finalIcon {
-                    self.appIcon = icon
-                    IconCacheManager.shared.setIcon(icon, for: cacheKey)
-                }
-            }
-        }
     }
 }
 
