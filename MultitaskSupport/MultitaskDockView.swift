@@ -478,6 +478,7 @@ public struct MultitaskDockSwiftView: View {
                     DockPanelView()
                         .frame(width: MultitaskDockManager.Constants.dockPanelWidth)
                         .offset(x: dockManager.isDockOpen ? 0 : MultitaskDockManager.Constants.dockPanelWidth)
+                        .allowsHitTesting(dockManager.isDockOpen)
 
                     // Always-visible edge handle
                     EdgeHandleView()
