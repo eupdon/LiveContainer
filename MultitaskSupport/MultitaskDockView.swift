@@ -261,7 +261,7 @@ class AppInfoProvider {
     }
 
     // MARK: - Show / Hide dock (the whole overlay)
-    @objc public func showDock() {
+   @objc public func showDock() {
         guard isDockEnabled() else { return }
         guard !isVisible, let hc = hostingController else { return }
 
@@ -281,11 +281,11 @@ class AppInfoProvider {
     @objc public func hideDock() {
         guard isVisible, let hc = hostingController else { return }
         DispatchQueue.main.async {
-            self.isDockOpen = false  // 즉시 설정
             UIView.animate(withDuration: Constants.springResponse) {
                 hc.view.alpha = 0
             } completion: { _ in
                 self.isVisible = false
+                self.isDockOpen = false
             }
         }
     }
