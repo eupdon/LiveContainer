@@ -340,27 +340,6 @@ class AppInfoProvider {
     }
 
     private func updateDockFrame(animated: Bool = true) {
-        guard let hostingController = hostingController else { return }
-
-        let screenBounds = keyWindow!.bounds
-        let currentDockWidth = self.dockWidth
-        
-        let dockHeight = calculateTargetDockHeight(forWidth: currentDockWidth)
-
-        let currentFrame = hostingController.view.frame
-        let isOnRightSide = (currentFrame.midX > screenBounds.width / 2) || (currentFrame.isEmpty)
-        let targetX = calculateTargetX(isDockHidden: self.isDockHidden, 
-                                    isOnRightSide: isOnRightSide, 
-                                    dockWidth: currentDockWidth, 
-                                    screenWidth: screenBounds.width)
-
-        let targetY = calculateTargetY(for: currentFrame, 
-                                    dockHeight: dockHeight, 
-                                    screenHeight: screenBounds.height)
-        
-        let newFrame = CGRect(x: targetX, y: targetY, width: currentDockWidth, height: dockHeight)
-        
-        applyNewFrame(newFrame, for: hostingController, animated: animated)
     }
 
     // MARK: - Frame Calculation Helpers
@@ -450,47 +429,36 @@ class AppInfoProvider {
         }
     }
     
+    // 수정: 독을 오른쪽 변 전체로 수
     @objc public func showDock() {
         guard isDockEnabled() else { return }
         guard !isVisible, let hostingController = hostingController else { return }
-        
         guard let keyWindow = self.keyWindow else { return }
         
         DispatchQueue.main.async {
             self.isVisible = true
+            let screen = keyWindow.bounds
             
-            let screenBounds = keyWindow.bounds
-            let currentDockWidth = self.dockWidth
-            let initialHeight = Constants.initialDockShowHeight
-            
-            // If not already in view hierarchy, add it
             if hostingController.view.superview == nil {
                 keyWindow.addSubview(hostingController.view)
-                hostingController.view.frame = CGRect(
-                    x: screenBounds.width - currentDockWidth,
-                    y: (screenBounds.height - initialHeight) / 2,
-                    width: currentDockWidth,
-                    height: initialHeight
-                )
             }
             
-            self.updateDockFrame(animated: false) 
+            // [수정] 독 윈도우 프레임을 오른쪽 변 세로 전체(screen.height)로 설정
+            // 가로폭(width)은 제스처 수신을 위해 60pt 정도로 넉넉히 잡습니다.
+            hostingController.view.frame = CGRect(
+                x: screen.width - 60, 
+                y: 0, 
+                width: 60, 
+                height: screen.height
+            )
+            hostingController.view.backgroundColor = .clear 
             
             self.setupEdgeGestureRecognizers()
             
-            hostingController.view.alpha = 0
-            let initialScale = Constants.initialScale
-            hostingController.view.transform = CGAffineTransform(scaleX: initialScale, y: initialScale)
-            
-            UIView.animate(
-                withDuration: Constants.standardAnimationDuration,
-                delay: 0,
-                usingSpringWithDamping: Constants.showHideSpringDamping,
-                initialSpringVelocity: Constants.showHideSpringVelocity,
-                options: .curveEaseOut
-            ) {
-                hostingController.view.alpha = 1
-                hostingController.view.transform = .identity
+            // 시각적으로 독이 나타나게 설정
+            hostingController.view.alpha = 1
+            withAnimation(.spring()) {
+                self.isDockHidden = false
             }
         }
     }
@@ -774,63 +742,60 @@ class AppInfoProvider {
         }
     }
     
-    // 수정: 멀티테스크 제스쳐 오른쪽 변으로 변경
+    // 수정: 멀티테스크 오른쪽 변에 제스처 변경
     private func setupEdgeGestureRecognizers() {
-        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let keyWindow = windowScene.windows.first else { return }
+        // 1. 독의 도화지(hostingController의 뷰)가 있는지 확인
+        guard let dockView = hostingController?.view else { return }
 
-        // 기존 제스처 청소
-        keyWindow.gestureRecognizers?.removeAll { gesture in
+        // 2. 독 뷰에 붙은 기존 제스처 청소
+        dockView.gestureRecognizers?.removeAll { gesture in
             return gesture is UIScreenEdgePanGestureRecognizer
         }
         
-        // 오른쪽 한 변 전체를 제스처 영역으로 등록 (독이 숨겨져 있을 때만)
-        if isDockHidden { 
-            let rightEdgeGesture = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(handleEdgeSwipe(_:)))
-            rightEdgeGesture.edges = .right
-            keyWindow.addGestureRecognizer(rightEdgeGesture)
-        }
+        // 3. 이제 최상위 레이어인 '독 뷰' 자체에 제스처를 등록합니다.
+        // 이렇게 하면 밑에 어떤 앱이 실행 중이어도 제스처를 100% 낚아챕니다.
+        let rightEdgeGesture = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(handleEdgeSwipe(_:)))
+        rightEdgeGesture.edges = .right
+        
+        // 앱 내부의 터치를 방해하지 않도록 설정
+        rightEdgeGesture.cancelsTouchesInView = false 
+        
+        dockView.addGestureRecognizer(rightEdgeGesture)
     }
+
 
     // 수정: 멀티테스크 제스쳐 동작 시간
     @objc private func handleEdgeSwipe(_ gesture: UIScreenEdgePanGestureRecognizer) {
         let translation = gesture.translation(in: gesture.view)
-        let velocity = gesture.velocity(in: gesture.view).x // 가로 속도 (-값이면 왼쪽 방향)
+        let velocity = gesture.velocity(in: gesture.view).x
         
         switch gesture.state {
         case .began:
-            // 1. 제스처 시작 시간과 상태 초기화
             self.gestureStartTime = Date()
             self.hasTriggeredDock = false
             
         case .changed:
-            // 2. 0.3초 이상 멈춰 있거나 천천히 밀면 '홀드'로 판단하여 독 표시
+            // 독이 손가락을 따라 이동하지 않도록 위치 업데이트 코드는 넣지 않습니다.
             if let startTime = self.gestureStartTime, !hasTriggeredDock {
                 let duration = Date().timeIntervalSince(startTime)
                 
-                // 0.3초 이상 머물렀고, 일정 거리(30pt) 이상 들어왔을 때 독 호출
+                // 0.3초 이상 멈췄을 때만 독을 표시 (isDockHidden 변경)
                 if duration > 0.3 && abs(translation.x) > 30 {
                     self.hasTriggeredDock = true
-                    
-                    // 독이 옆으로 밀려오지 않게 단순히 상태만 변경하여 팝업시킴
                     withAnimation(.spring()) {
-                        self.isDockHidden = false
+                        self.isDockHidden = false 
                     }
-                    
-                    // 햅틱 진동 (성공 신호)
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                 }
             }
             
         case .ended:
-            // 3. 손을 뗄 때까지 독이 안 떴고, 왼쪽으로 빠르게 던졌다면 '최소화' 실행
-            if !hasTriggeredDock {
-                if velocity < -500 {
-                    self.minimizeAllWindows() // 현재 앱 최소화 로직
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                }
+            // 홀드(독 표시)가 발생하지 않았고, 왼쪽으로 빠르게 던졌을 때만 최소화
+            if !hasTriggeredDock && velocity < -500 {
+                self.minimizeAllWindows() 
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
             }
-            // 상태 초기화
+            
             self.gestureStartTime = nil
             self.hasTriggeredDock = false
             
