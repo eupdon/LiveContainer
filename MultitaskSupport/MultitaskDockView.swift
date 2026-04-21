@@ -29,7 +29,6 @@ class AppInfoProvider {
 
     public func findAppInfo(byUUID dataUUID: String) -> LCAppInfo? {
         if let cached = cacheQueue.sync(execute: { infoCacheByUUID[dataUUID] }) { return cached }
-
         guard let appGroupPath = LCSharedUtils.appGroupPath()?.path else { return nil }
         let searchPaths = [
             "\(appGroupPath)/LiveContainer/Data/Application/\(dataUUID)/LCAppInfo.plist",
@@ -50,13 +49,11 @@ class AppInfoProvider {
 
     public func findAppInfo(byName appName: String) -> LCAppInfo? {
         if let cached = cacheQueue.sync(execute: { infoCacheByName[appName] }) { return cached }
-
         var searchPaths: [String] = []
         if let p = LCSharedUtils.appGroupPath()?.path { searchPaths.append("\(p)/LiveContainer/Applications") }
         if let p = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path {
             searchPaths.append("\(p)/Applications")
         }
-
         for appsPath in searchPaths {
             guard let dirs = try? FileManager.default.contentsOfDirectory(atPath: appsPath) else { continue }
             for dir in dirs where dir.hasSuffix(".app") {
@@ -122,10 +119,14 @@ class AppInfoProvider {
 
     /// 독 패널을 담는 호스팅 컨트롤러 (기본: 화면 오른쪽 밖에 위치)
     internal var dockHostingController: UIHostingController<AnyView>?
-    /// 오른쪽 변 80% 제스처 전용 투명 UIView
-    internal var gestureOverlayView: EdgeGestureView?
-    /// 독이 열렸을 때 바깥 영역 탭으로 닫기 위한 투명 오버레이
+
+    /// 제스처 전용 별도 UIWindow
+    /// 게스트 앱이 keyWindow 위에 올라와도 이 window는 항상 최상단에 위치함
+    private var gestureWindow: EdgeGestureWindow?
+
+    /// 독이 열렸을 때 바깥 탭으로 닫는 투명 오버레이
     private var dismissOverlay: UIView?
+
     /// Combine subscriptions
     private var cancellables = Set<AnyCancellable>()
 
@@ -142,18 +143,18 @@ class AppInfoProvider {
         /// 패널 내부 수직 패딩
         static let panelVerticalPadding: CGFloat = 16.0
 
-        /// 오른쪽 변 제스처 영역 너비 (투명)
+        /// 오른쪽 변 제스처 영역 너비
         static let gestureStripWidth: CGFloat = 22.0
         /// 오른쪽 변 상하 여백 비율 (각 10% → 80% 활성 영역)
         static let gestureStripEdgeRatio: CGFloat = 0.10
 
-        // 제스처 임계값
-        /// 짧은 스와이프 최솟값 (최소화 트리거)
-        static let shortSwipeMinX: CGFloat = 15.0
-        /// 긴 스와이프 임계값 (독 열기 트리거)
-        static let longSwipeThreshold: CGFloat = 65.0
-        /// 속도 기반 독 열기 임계값 (pt/s)
-        static let swipeVelocityThreshold: CGFloat = 500.0
+        // 시간 기반 제스처 임계값
+        /// 이 시간 이내에 터치를 떼면 "짧게" → 최소화
+        static let shortGestureMaxDuration: TimeInterval = 0.4
+        /// 이 시간 이상 터치를 유지하면 "길게" → 독 열기 (햅틱 피드백 발생)
+        static let longGestureMinDuration: TimeInterval = 0.4
+        /// 제스처로 인정할 최소 이동 거리 (손이 살짝 움직인 것 무시)
+        static let minSwipeDistance: CGFloat = 8.0
 
         // 애니메이션
         static let springResponse: TimeInterval = 0.38
@@ -179,7 +180,7 @@ class AppInfoProvider {
               let firstSubview = rootVC.view.subviews.first else { return }
         firstSubview.addSubview(self.windowHostingView)
         setupDockPanel()
-        setupGestureOverlay()
+        setupGestureWindow()
         subscribeToDockState()
         NotificationCenter.default.addObserver(self, selector: #selector(userDefaultsDidChange),
                                                name: UserDefaults.didChangeNotification,
@@ -193,7 +194,7 @@ class AppInfoProvider {
     @objc private func deviceOrientationDidChange() {
         DispatchQueue.main.async {
             self.updateDockFrame(animated: false)
-            self.updateGestureOverlayFrame()
+            self.updateGestureWindowFrame()
         }
     }
 
@@ -211,24 +212,40 @@ class AppInfoProvider {
             self.dockHostingController = hc
             guard let win = self.keyWindow else { return }
             win.addSubview(hc.view)
-            // 처음엔 화면 밖(숨김) 위치로 배치
             hc.view.frame = self.dockHiddenFrame()
         }
     }
 
-    // MARK: - 제스처 오버레이 setup (오른쪽 변 80%)
-    private func setupGestureOverlay() {
+    // MARK: - 제스처 전용 별도 UIWindow setup
+    /// keyWindow와 완전히 별도의 UIWindow를 만들어 windowLevel을 높게 설정.
+    /// 게스트 앱이 keyWindow의 어떤 서브뷰보다 위에 올라와도 이 window는 항상 그 위에 있음.
+    private func setupGestureWindow() {
         DispatchQueue.main.async {
-            guard let win = self.keyWindow else { return }
-            let overlay = EdgeGestureView(manager: self)
-            overlay.backgroundColor = .clear
-            win.addSubview(overlay)
-            self.gestureOverlayView = overlay
-            self.updateGestureOverlayFrame()
+            guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
+            let gw = EdgeGestureWindow(windowScene: scene, manager: self)
+            // .alert 레벨보다 살짝 낮게 → 시스템 알림은 방해하지 않으면서 게스트 앱보다는 위
+            gw.windowLevel = UIWindow.Level.alert - 1
+            gw.backgroundColor = .clear
+            gw.isHidden = false
+            self.gestureWindow = gw
+            self.updateGestureWindowFrame()
         }
     }
 
-    /// isDockOpen 변화 구독 → DismissOverlay show/hide
+    /// 오른쪽 변 80% 영역 프레임 갱신
+    func updateGestureWindowFrame() {
+        guard let win = keyWindow, let gw = gestureWindow else { return }
+        let bounds = win.bounds
+        let margin = bounds.height * Constants.gestureStripEdgeRatio
+        gw.frame = CGRect(
+            x: bounds.width - Constants.gestureStripWidth,
+            y: margin,
+            width: Constants.gestureStripWidth,
+            height: bounds.height - margin * 2
+        )
+    }
+
+    // MARK: - isDockOpen 구독 → dismissOverlay 관리
     private func subscribeToDockState() {
         $isDockOpen
             .receive(on: DispatchQueue.main)
@@ -240,34 +257,24 @@ class AppInfoProvider {
 
     // MARK: - 독 패널 프레임 계산
 
-    /// 화면 밖 숨김 위치: 오른쪽 변 중앙, X는 화면 우측 끝 밖
     private func dockHiddenFrame() -> CGRect {
         guard let win = keyWindow else { return .zero }
         let bounds = win.bounds
         let h = dockPanelHeight()
-        return CGRect(
-            x: bounds.width,                   // 화면 밖
-            y: (bounds.height - h) / 2,
-            width: Constants.dockPanelWidth,
-            height: h
-        )
+        return CGRect(x: bounds.width, y: (bounds.height - h) / 2,
+                      width: Constants.dockPanelWidth, height: h)
     }
 
-    /// 화면 안 열림 위치: 오른쪽 변 중앙 (safe area 고려)
     private func dockOpenFrame() -> CGRect {
         guard let win = keyWindow else { return .zero }
         let bounds = win.bounds
         let h = dockPanelHeight()
         let safeRight = safeAreaInsets.right
-        return CGRect(
-            x: bounds.width - Constants.dockPanelWidth - safeRight,
-            y: (bounds.height - h) / 2,
-            width: Constants.dockPanelWidth,
-            height: h
-        )
+        return CGRect(x: bounds.width - Constants.dockPanelWidth - safeRight,
+                      y: (bounds.height - h) / 2,
+                      width: Constants.dockPanelWidth, height: h)
     }
 
-    /// 앱 수에 따른 동적 패널 높이
     private func dockPanelHeight() -> CGFloat {
         let count = max(1, apps.count)
         let icons = CGFloat(count) * Constants.iconSize + CGFloat(count - 1) * Constants.iconSpacing
@@ -290,37 +297,16 @@ class AppInfoProvider {
         }
     }
 
-    func updateGestureOverlayFrame() {
-        guard let win = keyWindow, let overlay = gestureOverlayView else { return }
-        let bounds = win.bounds
-        let margin = bounds.height * Constants.gestureStripEdgeRatio
-        overlay.frame = CGRect(
-            x: bounds.width - Constants.gestureStripWidth,
-            y: margin,
-            width: Constants.gestureStripWidth,
-            height: bounds.height - margin * 2
-        )
-        // 제스처 오버레이 → 독 패널보다 아래에 위치 (독이 열리면 패널이 위에 있어야 함)
-        if let hc = dockHostingController {
-            win.insertSubview(overlay, belowSubview: hc.view)
-        } else {
-            win.bringSubviewToFront(overlay)
-        }
-    }
-
     // MARK: - 독 열기 / 닫기
     @objc public func openDock() {
         guard !isDockOpen else { return }
         DispatchQueue.main.async {
-            // 먼저 숨김 위치로 snap (높이 변경 대응)
             self.dockHostingController?.view.frame = self.dockHiddenFrame()
             self.isDockOpen = true
             self.updateDockFrame(animated: true)
-            // 독 패널을 화면 최상단으로
             if let win = self.keyWindow, let hc = self.dockHostingController {
                 win.bringSubviewToFront(hc.view)
             }
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         }
     }
 
@@ -332,7 +318,7 @@ class AppInfoProvider {
         }
     }
 
-    // MARK: - 바깥 탭 오버레이 (독 닫기)
+    // MARK: - 바깥 탭 오버레이
     private func showDismissOverlay() {
         guard dismissOverlay == nil, let win = keyWindow else { return }
         let overlay = UIView(frame: win.bounds)
@@ -340,7 +326,6 @@ class AppInfoProvider {
         overlay.backgroundColor = .clear
         let tap = UITapGestureRecognizer(target: self, action: #selector(dismissOverlayTapped))
         overlay.addGestureRecognizer(tap)
-        // 독 패널 바로 아래에 삽입
         if let hc = dockHostingController {
             win.insertSubview(overlay, belowSubview: hc.view)
         } else {
@@ -358,12 +343,11 @@ class AppInfoProvider {
         closeDock()
     }
 
-    // MARK: - 짧은 스와이프: 모든 앱 최소화 + 앱 목록 화면 표시
+    // MARK: - 짧게: 모든 앱 최소화 + 앱 목록 표시
     @objc public func minimizeAllAndShowAppList() {
         DispatchQueue.main.async {
             self.minimizeAllWindows()
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            // LiveContainer 앱 목록 화면으로 전환 노티
             NotificationCenter.default.post(
                 name: NSNotification.Name("LCShowAppListFromGesture"),
                 object: nil
@@ -371,7 +355,7 @@ class AppInfoProvider {
         }
     }
 
-    // MARK: - 앱 전환 (아이콘 탭)
+    // MARK: - 앱 전환
     func switchToApp(uuid: String) {
         closeDock()
         DispatchQueue.main.asyncAfter(deadline: .now() + Constants.springResponse * 0.5) {
@@ -392,7 +376,6 @@ class AppInfoProvider {
         let model = DockAppModel(appName: name, appUUID: appUUID, appInfo: appInfo, view: view)
         DispatchQueue.main.async {
             self.apps.append(model)
-            // 앱 수 변화에 따른 패널 높이 갱신 (숨겨진 상태에서도 위치 미리 갱신)
             if !self.isDockOpen { self.updateDockFrame(animated: false) }
         }
     }
@@ -420,7 +403,6 @@ class AppInfoProvider {
     func bringMultitaskViewToFront(uuid: String, from center: CGPoint? = nil) -> Bool {
         guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return false }
         guard let targetView = apps.first(where: { $0.appUUID == uuid })?.view else { return false }
-
         if let launchUrl = UserDefaults.standard.string(forKey: "launchAppUrlScheme") {
             UserDefaults.standard.removeObject(forKey: "launchAppUrlScheme")
             if let vc = targetView._viewDelegate() as? DecoratedAppSceneViewController {
@@ -461,10 +443,8 @@ class AppInfoProvider {
             }
             UIView.animate(
                 withDuration: Constants.springResponse,
-                delay: 0,
-                usingSpringWithDamping: 1.0,
-                initialSpringVelocity: 0,
-                options: .curveEaseInOut
+                delay: 0, usingSpringWithDamping: 1.0,
+                initialSpringVelocity: 0, options: .curveEaseInOut
             ) {
                 view.alpha = 1.0
                 view.transform = .identity
@@ -472,14 +452,10 @@ class AppInfoProvider {
             }
         } else {
             UIView.animate(withDuration: Constants.shortAnim1) {
-                view.transform = CGAffineTransform(
-                    scaleX: Constants.bringToFrontScale,
-                    y: Constants.bringToFrontScale
-                )
+                view.transform = CGAffineTransform(scaleX: Constants.bringToFrontScale,
+                                                    y: Constants.bringToFrontScale)
             } completion: { _ in
-                UIView.animate(withDuration: Constants.shortAnim2) {
-                    view.transform = .identity
-                }
+                UIView.animate(withDuration: Constants.shortAnim2) { view.transform = .identity }
             }
         }
     }
@@ -510,60 +486,121 @@ class AppInfoProvider {
     }
 }
 
+// MARK: - EdgeGestureWindow
+/// 게스트 앱이 keyWindow 위를 덮어도 항상 그 위에 있는 별도 UIWindow.
+/// windowLevel = .alert - 1 로 설정하여 게스트 앱 뷰보다 항상 위에 위치.
+/// hitTest를 통해 독이 열린 상태에서는 터치를 통과시키고,
+/// 닫힌 상태에서만 제스처 뷰가 터치를 처리.
+@available(iOS 16.0, *)
+class EdgeGestureWindow: UIWindow {
+    private weak var manager: MultitaskDockManager?
+    private let gestureView: EdgeGestureView
+
+    init(windowScene: UIWindowScene, manager: MultitaskDockManager) {
+        self.manager = manager
+        self.gestureView = EdgeGestureView(manager: manager)
+        super.init(windowScene: windowScene)
+        self.rootViewController = EdgeGestureHostViewController(contentView: gestureView)
+        self.backgroundColor = .clear
+        self.isOpaque = false
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// 독이 열려 있을 때는 이 window가 터치를 가로채지 않도록 nil 반환
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        guard let mgr = manager, !mgr.isDockOpen else { return nil }
+        return super.hitTest(point, with: event)
+    }
+}
+
+/// EdgeGestureWindow의 rootViewController - 배경 없이 gestureView만 표시
+@available(iOS 16.0, *)
+class EdgeGestureHostViewController: UIViewController {
+    private let contentView: UIView
+
+    init(contentView: UIView) {
+        self.contentView = contentView
+        super.init(nibName: nil, bundle: nil)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .clear
+        view.addSubview(contentView)
+        contentView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            contentView.topAnchor.constraint(equalTo: view.topAnchor),
+            contentView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            contentView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            contentView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+        ])
+    }
+}
+
 // MARK: - EdgeGestureView
-/// 오른쪽 변 80% 영역을 덮는 완전 투명 UIView.
-/// 짧은 왼쪽 스와이프 → 최소화+앱 목록 / 긴 왼쪽 스와이프 → 독 열기
+/// 오른쪽 변 80% 영역의 실제 제스처 처리 뷰.
+///
+/// iOS 홈 버튼 제스처와 동일한 방식:
+///   - 짧게 터치 후 떼기  (< 0.4초) → 모든 앱 최소화 + 앱 목록 표시
+///   - 길게 누르고 있기   (≥ 0.4초, 햅틱 발생) → 터치 떼면 독 열기
 @available(iOS 16.0, *)
 class EdgeGestureView: UIView {
     private weak var manager: MultitaskDockManager?
-    private var touchStart: CGPoint = .zero
-    private var touchStartTime: TimeInterval = 0
+
+    private var touchBeganTime: TimeInterval = 0
+    private var longPressTriggered: Bool = false
+    /// 길게 누르기 임계값 도달 시 실행되는 타이머
+    private var longPressTimer: Timer?
 
     init(manager: MultitaskDockManager) {
         self.manager = manager
         super.init(frame: .zero)
         isUserInteractionEnabled = true
+        backgroundColor = .clear
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    // 독이 열려 있으면 이 뷰는 터치를 받지 않음 → 독 패널과 dismiss 오버레이가 처리
-    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        guard let mgr = manager, !mgr.isDockOpen else { return nil }
-        return bounds.contains(point) ? self : nil
-    }
-
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let t = touches.first else { return }
-        touchStart = t.location(in: self)
-        touchStartTime = t.timestamp
-    }
+        touchBeganTime = t.timestamp
+        longPressTriggered = false
 
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let t = touches.first, let mgr = manager else { return }
-
-        let end = t.location(in: self)
-        // 왼쪽으로 이동한 거리 (양수 = 왼쪽)
-        let dx = touchStart.x - end.x
-        let dy = abs(touchStart.y - end.y)
-        let dt = t.timestamp - touchStartTime
-        let velocityX = dt > 0 ? dx / dt : 0
-
-        // 수평 스와이프인지 확인 (세로 이동이 가로의 80% 미만)
-        guard dy < dx * 1.5, dx >= MultitaskDockManager.Constants.shortSwipeMinX else { return }
-
-        let isLong = dx >= MultitaskDockManager.Constants.longSwipeThreshold
-        let isFast = velocityX >= MultitaskDockManager.Constants.swipeVelocityThreshold
-
-        if isLong || isFast {
-            // 긴 스와이프 or 빠른 스와이프 → 독 열기
-            mgr.openDock()
-        } else {
-            // 짧은 스와이프 → 모든 앱 최소화 + 앱 목록 표시
-            mgr.minimizeAllAndShowAppList()
+        // 길게 누르기 타이머 시작
+        longPressTimer?.invalidate()
+        longPressTimer = Timer.scheduledTimer(
+            withTimeInterval: MultitaskDockManager.Constants.longGestureMinDuration,
+            repeats: false
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            // 임계값 도달 → 햅틱으로 피드백 (아직 열지는 않고 손가락 떼는 것을 기다림)
+            self.longPressTriggered = true
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         }
     }
 
-    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {}
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        longPressTimer?.invalidate()
+        longPressTimer = nil
+        guard let mgr = manager else { return }
+
+        if longPressTriggered {
+            // 길게 눌렀다가 뗌 → 독 열기
+            mgr.openDock()
+        } else {
+            // 짧게 뗌 → 최소화 + 앱 목록
+            mgr.minimizeAllAndShowAppList()
+        }
+
+        longPressTriggered = false
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        longPressTimer?.invalidate()
+        longPressTimer = nil
+        longPressTriggered = false
+    }
 }
 
 // MARK: - DockPanelView (SwiftUI)
