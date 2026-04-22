@@ -223,8 +223,9 @@ class AppInfoProvider {
         DispatchQueue.main.async {
             guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
             let gw = EdgeGestureWindow(windowScene: scene, manager: self)
-            // .alert 레벨보다 살짝 낮게 → 시스템 알림은 방해하지 않으면서 게스트 앱보다는 위
-            gw.windowLevel = UIWindow.Level.alert - 1
+            // .alert + 1 → 게스트 앱 UIWindow를 포함한 모든 앱 레이어 위에 위치
+            // 시스템 알림(alert)보다도 위지만 제스처 영역만 터치를 수신하므로 UX 방해 없음
+            gw.windowLevel = UIWindow.Level.alert + 1
             gw.backgroundColor = .clear
             gw.isHidden = false
             self.gestureWindow = gw
@@ -507,17 +508,20 @@ class EdgeGestureWindow: UIWindow {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    /// 독이 열려 있을 때는 이 window가 터치를 가로채지 않도록 nil 반환
+    /// 독이 열려 있거나 제스처 영역 밖이면 터치를 통과시킴
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         guard let mgr = manager, !mgr.isDockOpen else { return nil }
-        return super.hitTest(point, with: event)
+        guard let gvc = rootViewController as? EdgeGestureHostViewController else { return nil }
+        let converted = gvc.contentView.convert(point, from: self)
+        guard gvc.contentView.bounds.contains(converted) else { return nil }
+        return gvc.contentView
     }
 }
 
 /// EdgeGestureWindow의 rootViewController - 배경 없이 gestureView만 표시
 @available(iOS 16.0, *)
 class EdgeGestureHostViewController: UIViewController {
-    private let contentView: UIView
+    let contentView: UIView  // EdgeGestureWindow.hitTest에서 접근
 
     init(contentView: UIView) {
         self.contentView = contentView
