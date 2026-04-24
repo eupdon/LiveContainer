@@ -236,7 +236,7 @@ class AppInfoProvider {
             let gw = EdgeGestureWindow(windowScene: scene, manager: self)
             // .alert + 1.0 → 독 window(.alert+0.9)와 dismiss window(.alert+0.8) 모두 위
             // 제스처 window hitTest에서 영역 밖 터치는 nil 반환하므로 앱 조작 방해 없음
-            gw.windowLevel = UIWindow.Level.maximum
+            gw.windowLevel = UIWindow.Level(rawValue: 9999)
             gw.backgroundColor = .clear
             gw.isHidden = false
             self.gestureWindow = gw
