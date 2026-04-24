@@ -216,7 +216,7 @@ class AppInfoProvider {
             self.dockHostingController = hc
 
             let dw = UIWindow(windowScene: scene)
-            dw.windowLevel = UIWindow.Level.alert + 1.9
+            dw.windowLevel = UIWindow.Level.alert + 0.9
             dw.backgroundColor = .clear
             dw.isOpaque = false
             dw.rootViewController = hc
@@ -236,7 +236,7 @@ class AppInfoProvider {
             let gw = EdgeGestureWindow(windowScene: scene, manager: self)
             // .alert + 1.0 → 독 window(.alert+0.9)와 dismiss window(.alert+0.8) 모두 위
             // 제스처 window hitTest에서 영역 밖 터치는 nil 반환하므로 앱 조작 방해 없음
-            gw.windowLevel = UIWindow.Level.alert + 2.0
+            gw.windowLevel = UIWindow.Level.maximum
             gw.backgroundColor = .clear
             gw.isHidden = false
             self.gestureWindow = gw
@@ -338,7 +338,7 @@ class AppInfoProvider {
               let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
               let win = keyWindow else { return }
         let dmw = DismissTapWindow(windowScene: scene, manager: self)
-        dmw.windowLevel = UIWindow.Level.alert + 1.8
+        dmw.windowLevel = UIWindow.Level.alert + 0.8
         dmw.backgroundColor = .clear
         dmw.isOpaque = false
         dmw.frame = win.bounds
