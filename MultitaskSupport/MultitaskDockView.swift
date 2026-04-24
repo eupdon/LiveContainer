@@ -130,7 +130,8 @@ class AppInfoProvider {
 
 // MARK: - MultitaskDockView Manager
 @available(iOS 16.0, *)
-@objc public class MultitaskDockManager: NSObject, ObservableObject {
+@objcMembers
+public class MultitaskDockManager: NSObject, ObservableObject {
     @objc public static let shared = MultitaskDockManager()
     
     @Published var apps: [DockAppModel] = []
