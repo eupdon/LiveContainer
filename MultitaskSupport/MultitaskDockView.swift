@@ -118,7 +118,7 @@ class AppInfoProvider {
     @objc public var windowHostingView = VirtualWindowsHostView()
 
     /// 독 패널 전용 UIWindow — 게스트 앱 window보다 높은 레벨로 항상 위에 표시
-    private var dockWindow: UIWindow?
+    internal  var dockWindow: UIWindow?
     internal var dockHostingController: UIHostingController<AnyView>?
 
     /// 제스처 전용 UIWindow — 모든 window 중 최상단
