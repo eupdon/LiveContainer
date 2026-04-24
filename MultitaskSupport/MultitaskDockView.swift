@@ -2,7 +2,10 @@
 //  MultitaskDockView.swift
 //  LiveContainer
 //
-//  Created by boa-z on 2025/6/28.
+//  Modified for simplified dock behavior:
+//  1. Always semi-transparent, half-hidden on right side
+//  2. Short swipe → minimize all apps, go to app list
+//  3. Long press → show full dock
 //
 
 import Foundation
@@ -12,34 +15,44 @@ import Combine
 
 // MARK: - App Info Provider
 class AppInfoProvider {
-
+    
     static let shared = AppInfoProvider()
-
+    
     private var infoCacheByUUID = [String: LCAppInfo]()
     private var infoCacheByName = [String: LCAppInfo]()
     private let cacheQueue = DispatchQueue(label: "com.livecontainer.appinfoprovider.cachequeue", attributes: .concurrent)
-
+    
     private init() {}
-
+    
     public func findAppInfo(appName: String, dataUUID: String) -> LCAppInfo? {
-        if let appInfo = findAppInfoFromSharedModel(appName: appName, dataUUID: dataUUID) { return appInfo }
-        if let appInfo = findAppInfo(byUUID: dataUUID) { return appInfo }
+        if let appInfo = findAppInfoFromSharedModel(appName: appName, dataUUID: dataUUID) {
+            return appInfo
+        }
+        if let appInfo = findAppInfo(byUUID: dataUUID) {
+            return appInfo
+        }
         return findAppInfo(byName: appName)
     }
-
+    
     public func findAppInfo(byUUID dataUUID: String) -> LCAppInfo? {
-        if let cached = cacheQueue.sync(execute: { infoCacheByUUID[dataUUID] }) { return cached }
+        if let cachedInfo = cacheQueue.sync(execute: { infoCacheByUUID[dataUUID] }) {
+            return cachedInfo
+        }
+        
         guard let appGroupPath = LCSharedUtils.appGroupPath()?.path else { return nil }
+        
         let searchPaths = [
             "\(appGroupPath)/LiveContainer/Data/Application/\(dataUUID)/LCAppInfo.plist",
             "\(appGroupPath)/Containers/\(dataUUID)/LCAppInfo.plist",
             "\(FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path ?? "")/Data/Application/\(dataUUID)/LCAppInfo.plist"
         ]
+        
         for path in searchPaths {
             if FileManager.default.fileExists(atPath: path),
-               let dict = NSDictionary(contentsOfFile: path),
-               let bundlePath = dict["bundlePath"] as? String,
+               let appInfoDict = NSDictionary(contentsOfFile: path),
+               let bundlePath = appInfoDict["bundlePath"] as? String,
                let appInfo = LCAppInfo(bundlePath: bundlePath) {
+                
                 cacheQueue.async(flags: .barrier) { self.infoCacheByUUID[dataUUID] = appInfo }
                 return appInfo
             }
@@ -48,18 +61,25 @@ class AppInfoProvider {
     }
 
     public func findAppInfo(byName appName: String) -> LCAppInfo? {
-        if let cached = cacheQueue.sync(execute: { infoCacheByName[appName] }) { return cached }
-        var searchPaths: [String] = []
-        if let p = LCSharedUtils.appGroupPath()?.path { searchPaths.append("\(p)/LiveContainer/Applications") }
-        if let p = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path {
-            searchPaths.append("\(p)/Applications")
+        if let cachedInfo = cacheQueue.sync(execute: { infoCacheByName[appName] }) {
+            return cachedInfo
         }
+
+        var searchPaths: [String] = []
+        if let appGroupPath = LCSharedUtils.appGroupPath()?.path {
+            searchPaths.append("\(appGroupPath)/LiveContainer/Applications")
+        }
+        if let docPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path {
+            searchPaths.append("\(docPath)/Applications")
+        }
+
         for appsPath in searchPaths {
-            guard let dirs = try? FileManager.default.contentsOfDirectory(atPath: appsPath) else { continue }
-            for dir in dirs where dir.hasSuffix(".app") {
-                if let info = LCAppInfo(bundlePath: "\(appsPath)/\(dir)"), info.displayName() == appName {
-                    cacheQueue.async(flags: .barrier) { self.infoCacheByName[appName] = info }
-                    return info
+            guard let appDirs = try? FileManager.default.contentsOfDirectory(atPath: appsPath) else { continue }
+            
+            for appDir in appDirs where appDir.hasSuffix(".app") {
+                if let appInfo = LCAppInfo(bundlePath: "\(appsPath)/\(appDir)"), appInfo.displayName() == appName {
+                    cacheQueue.async(flags: .barrier) { self.infoCacheByName[appName] = appInfo }
+                    return appInfo
                 }
             }
         }
@@ -68,15 +88,21 @@ class AppInfoProvider {
 
     private func findAppInfoFromSharedModel(appName: String, dataUUID: String) -> LCAppInfo? {
         let allApps = DataManager.shared.model.apps + DataManager.shared.model.hiddenApps
-        for m in allApps {
-            if m.appInfo.containers.contains(where: { $0.folderName == dataUUID }) { return m.appInfo }
+        
+        for appModel in allApps {
+            if appModel.appInfo.containers.contains(where: { $0.folderName == dataUUID }) {
+                return appModel.appInfo
+            }
         }
-        for m in allApps {
-            if m.appInfo.displayName() == appName { return m.appInfo }
+        
+        for appModel in allApps {
+            if appModel.appInfo.displayName() == appName {
+                return appModel.appInfo
+            }
         }
         return nil
     }
-
+    
     public func clearCache() {
         cacheQueue.async(flags: .barrier) {
             self.infoCacheByUUID.removeAll()
@@ -92,7 +118,7 @@ class AppInfoProvider {
     @objc let appUUID: String
     let appInfo: LCAppInfo?
     let view: UIView?
-
+    
     @objc init(appName: String, appUUID: String, appInfo: LCAppInfo? = nil, view: UIView?) {
         self.appName = appName
         self.appUUID = appUUID
@@ -102,667 +128,500 @@ class AppInfoProvider {
     }
 }
 
-// MARK: - MultitaskDockManager
+// MARK: - MultitaskDockView Manager
 @available(iOS 16.0, *)
 @objc public class MultitaskDockManager: NSObject, ObservableObject {
     @objc public static let shared = MultitaskDockManager()
-
+    
     @Published var apps: [DockAppModel] = []
     @Published var isVisible: Bool = false
-    /// true = 독 패널이 화면 안(오른쪽 변)으로 슬라이드인 된 상태
-    @Published var isDockOpen: Bool = false
-    /// 하위호환 유지
-    @Published @objc var isCollapsed: Bool = false
-    @Published var settingsChanged: Bool = false
-
+    
+    // 독이 전체 표시되어 있는지 (길게 누를 때만 true)
+    @Published var isExpanded: Bool = false
+    
+    // 제스처 시간 추적
+    private var gestureStartTime: Date?
+    
     @objc public var windowHostingView = VirtualWindowsHostView()
+    internal var hostingController: UIHostingController<AnyView>?
 
-    /// 독 패널 전용 UIWindow — 게스트 앱 window보다 높은 레벨로 항상 위에 표시
-    internal  var dockWindow: UIWindow?
-    internal var dockHostingController: UIHostingController<AnyView>?
-
-    /// 제스처 전용 UIWindow — 모든 window 중 최상단
-    private var gestureWindow: EdgeGestureWindow?
-
-    /// 독 열림 시에만 isHidden=false 로 전환되는 바깥 탭 감지용 UIWindow
-    private var dismissWindow: UIWindow?
-
-    /// Combine subscriptions
-    private var cancellables = Set<AnyCancellable>()
-
-    // MARK: - Constants
     public struct Constants {
-        /// 독 패널 너비
-        static let dockPanelWidth: CGFloat = 76.0
-        /// 독 패널 최소 높이
-        static let dockPanelMinHeight: CGFloat = 120.0
-        /// 아이콘 크기
-        static let iconSize: CGFloat = 52.0
-        /// 아이콘 간격
-        static let iconSpacing: CGFloat = 10.0
-        /// 패널 내부 수직 패딩
-        static let panelVerticalPadding: CGFloat = 16.0
+        // MARK: - Layout & Sizing
+        static let defaultDockWidth: CGFloat = 90.0
+        static let maxIconSize: CGFloat = 100.0
+        static let minCollapsedHeight: CGFloat = 60.0
+        static let minCollapsedButtonSize: CGFloat = 44.0
+        static let maxCollapsedButtonSize: CGFloat = 80.0
 
-        /// 오른쪽 변 제스처 영역 너비
-        static let gestureStripWidth: CGFloat = 22.0
-        /// 오른쪽 변 상하 여백 비율 (각 10% → 80% 활성 영역)
-        static let gestureStripEdgeRatio: CGFloat = 0.10
+        // MARK: - Margins & Padding
+        static let dockVerticalMargin: CGFloat = 30.0
+        static let dockContentSpacing: CGFloat = 8.0
+        static let dockVerticalPadding: CGFloat = 30.0
 
-        // 시간 기반 제스처 임계값
-        /// 이 시간 이내에 터치를 떼면 "짧게" → 최소화
-        static let shortGestureMaxDuration: TimeInterval = 0.4
-        /// 이 시간 이상 터치를 유지하면 "길게" → 독 열기 (햅틱 피드백 발생)
-        static let longGestureMinDuration: TimeInterval = 0.4
-        /// 제스처로 인정할 최소 이동 거리 (손이 살짝 움직인 것 무시)
-        static let minSwipeDistance: CGFloat = 8.0
-
-        // 애니메이션
-        static let springResponse: TimeInterval = 0.38
-        static let springDamping: CGFloat = 0.82
-        static let shortAnim1: TimeInterval = 0.15
-        static let shortAnim2: TimeInterval = 0.10
-        static let bringToFrontScale: CGFloat = 1.03
+        // MARK: - Ratios & Factors
+        static let iconToWidthRatio: CGFloat = 0.75
+        static let collapsedButtonToWidthRatio: CGFloat = 0.7
+        static let maxHeightRatioOfAvailableArea: CGFloat = 0.85
+        
+        // MARK: - Animation & Interaction
+        static let longPressThreshold: TimeInterval = 0.5
+        
+        static let standardAnimationDuration: TimeInterval = 0.3
+        static let longAnimationDuration: TimeInterval = 0.4
+        static let shortAnimationDuration1: TimeInterval = 0.15
+        static let shortAnimationDuration2: TimeInterval = 0.1
+        
+        static let standardSpringDamping: CGFloat = 0.8
+        static let showHideSpringDamping: CGFloat = 0.7
+        static let standardSpringVelocity: CGFloat = 0.3
+        static let showHideSpringVelocity: CGFloat = 0.5
+        
+        static let initialScale: CGFloat = 0.8
+        static let bringToFrontScale: CGFloat = 1.02
+        
+        // 투명 상태에서 보이지 않는 부분 (절반 가림)
+        static let hiddenOffsetRatio: CGFloat = 0.5
+    }
+    
+    public var dockWidth: CGFloat {
+        let storedValue = LCUtils.appGroupUserDefault.double(forKey: "LCDockWidth")
+        return storedValue > 0 ? CGFloat(storedValue) : Constants.defaultDockWidth
+    }
+    
+    private func calculateIconSize(for width: CGFloat) -> CGFloat {
+        let iconSize = width * Constants.iconToWidthRatio
+        return min(Constants.maxIconSize, iconSize)
     }
 
-    // MARK: - Window
+    private func calculateButtonSize(for width: CGFloat) -> CGFloat {
+        let targetSize = width * Constants.collapsedButtonToWidthRatio
+        return max(Constants.minCollapsedButtonSize, min(Constants.maxCollapsedButtonSize, targetSize))
+    }
+
+    public var adaptiveIconSize: CGFloat {
+        return calculateIconSize(for: dockWidth)
+    }
+
     public var keyWindow: UIWindow? {
         (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.windows.first
     }
+
     public var safeAreaInsets: UIEdgeInsets {
-        keyWindow?.safeAreaInsets ?? .zero
+        if #available(iOS 11.0, *) {
+            return keyWindow?.safeAreaInsets ?? .zero
+        }
+        return .zero
     }
 
-    // MARK: - Init
     override init() {
         super.init()
-        guard let win = keyWindow,
-              let rootVC = win.rootViewController,
-              let firstSubview = rootVC.view.subviews.first else { return }
-        firstSubview.addSubview(self.windowHostingView)
-        setupDockPanel()
-        setupGestureWindow()
-        subscribeToDockState()
-        NotificationCenter.default.addObserver(self, selector: #selector(userDefaultsDidChange),
-                                               name: UserDefaults.didChangeNotification,
-                                               object: LCUtils.appGroupUserDefault)
-        NotificationCenter.default.addObserver(self, selector: #selector(deviceOrientationDidChange),
-                                               name: UIDevice.orientationDidChangeNotification, object: nil)
+        keyWindow!.rootViewController!.view.subviews.first!.addSubview(self.windowHostingView)
+        setupDockView()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(deviceOrientationDidChange),
+            name: UIDevice.orientationDidChangeNotification,
+            object: nil
+        )
     }
-
-    deinit { NotificationCenter.default.removeObserver(self) }
+    
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+        NotificationCenter.default.removeObserver(self, name: UIDevice.orientationDidChangeNotification, object: nil)
+    }
 
     @objc private func deviceOrientationDidChange() {
         DispatchQueue.main.async {
-            self.updateDockFrame(animated: false)
-            self.updateGestureWindowFrame()
-        }
-    }
-
-    @objc private func userDefaultsDidChange() {
-        DispatchQueue.main.async { self.settingsChanged.toggle() }
-    }
-
-    // MARK: - 독 패널 setup
-    // 독 패널은 별도 UIWindow 로 올려서 게스트 앱 window 위에 항상 위치하게 함.
-    // windowLevel: .alert + 0.9 (gestureWindow .alert+1.0 보다 살짝 낮아 제스처가 우선)
-    private func setupDockPanel() {
-        DispatchQueue.main.async {
-            guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
-
-            let view = AnyView(DockPanelView().environmentObject(self))
-            let hc = UIHostingController(rootView: view)
-            hc.view.backgroundColor = .clear
-            hc.view.isUserInteractionEnabled = true
-            self.dockHostingController = hc
-
-            let dw = UIWindow(windowScene: scene)
-            dw.windowLevel = UIWindow.Level.alert + 0.9
-            dw.backgroundColor = .clear
-            dw.isOpaque = false
-            dw.rootViewController = hc
-            // 처음에는 화면 밖 위치로 frame 설정
-            dw.frame = self.dockHiddenFrame()
-            dw.isHidden = false
-            self.dockWindow = dw
-        }
-    }
-
-    // MARK: - 제스처 전용 별도 UIWindow setup
-    /// keyWindow와 완전히 별도의 UIWindow를 만들어 windowLevel을 높게 설정.
-    /// 게스트 앱이 keyWindow의 어떤 서브뷰보다 위에 올라와도 이 window는 항상 그 위에 있음.
-    private func setupGestureWindow() {
-        DispatchQueue.main.async {
-            guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
-            let gw = EdgeGestureWindow(windowScene: scene, manager: self)
-            // .alert + 1.0 → 독 window(.alert+0.9)와 dismiss window(.alert+0.8) 모두 위
-            // 제스처 window hitTest에서 영역 밖 터치는 nil 반환하므로 앱 조작 방해 없음
-            gw.windowLevel = UIWindow.Level(rawValue: 9999)
-            gw.backgroundColor = .clear
-            gw.isHidden = false
-            self.gestureWindow = gw
-            self.updateGestureWindowFrame()
-        }
-    }
-
-    /// 제스처 window를 전체 화면 크기로 유지.
-    /// 실제 터치 수신 영역은 EdgeGestureWindow.hitTest 에서 오른쪽 변 80%로 필터링.
-    func updateGestureWindowFrame() {
-        guard let win = keyWindow, let gw = gestureWindow else { return }
-        gw.frame = win.bounds
-        // dockWindow도 함께 갱신
-        if let dw = dockWindow {
-            dw.frame = isDockOpen ? dockOpenFrame() : dockHiddenFrame()
-        }
-        // dismissWindow도 함께 갱신
-        if let dmw = dismissWindow {
-            dmw.frame = win.bounds
-        }
-    }
-
-    // MARK: - isDockOpen 구독 → dismissOverlay 관리
-    private func subscribeToDockState() {
-        $isDockOpen
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] isOpen in
-                if isOpen { self?.showDismissOverlay() } else { self?.hideDismissOverlay() }
+            if self.isVisible {
+                self.updateDockFrame()
             }
-            .store(in: &cancellables)
+        }
+    }
+    
+    private func setupDockView() {
+        DispatchQueue.main.async {
+            let dockView = AnyView(MultitaskDockSwiftView()
+                .environmentObject(self))
+            
+            self.hostingController = UIHostingController(rootView: dockView)
+            self.hostingController?.view.autoresizingMask = [.flexibleTopMargin, .flexibleLeftMargin, .flexibleRightMargin, .flexibleBottomMargin]
+            self.hostingController?.view.backgroundColor = .clear
+        }
     }
 
-    // MARK: - 독 패널 프레임 계산
+    private func updateDockFrame(animated: Bool = true) {
+        guard let hostingController = hostingController else { return }
 
-    private func dockHiddenFrame() -> CGRect {
-        guard let win = keyWindow else { return .zero }
-        let bounds = win.bounds
-        let h = dockPanelHeight()
-        return CGRect(x: bounds.width, y: (bounds.height - h) / 2,
-                      width: Constants.dockPanelWidth, height: h)
-    }
+        let screenBounds = keyWindow!.bounds
+        
+        let dockHeight = Constants.minCollapsedHeight
+        let currentDockWidth = self.dockWidth
+        
+        // 항상 오른쪽에 있고, isExpanded 상태에 따라 투명도/위치 결정
+        let targetX: CGFloat
+        let targetOpacity: CGFloat
+        
+        if isExpanded {
+            // 완전히 표시된 상태
+            targetX = screenBounds.width - currentDockWidth
+            targetOpacity = 1.0
+        } else {
+            // 반쯤 가려진 상태 (항상 이 상태)
+            targetX = screenBounds.width - (currentDockWidth * Constants.hiddenOffsetRatio)
+            targetOpacity = 0.4
+        }
 
-    private func dockOpenFrame() -> CGRect {
-        guard let win = keyWindow else { return .zero }
-        let bounds = win.bounds
-        let h = dockPanelHeight()
-        let safeRight = safeAreaInsets.right
-        return CGRect(x: bounds.width - Constants.dockPanelWidth - safeRight,
-                      y: (bounds.height - h) / 2,
-                      width: Constants.dockPanelWidth, height: h)
-    }
+        let safeAreaMinY = self.safeAreaInsets.top + Constants.dockVerticalMargin
+        let safeAreaMaxY = screenBounds.height - self.safeAreaInsets.bottom - dockHeight - Constants.dockVerticalMargin
+        let safeAreaCenterY = safeAreaMinY + (safeAreaMaxY - safeAreaMinY) / 2
+        let targetY = max(safeAreaMinY, min(safeAreaMaxY, safeAreaCenterY - dockHeight / 2))
 
-    private func dockPanelHeight() -> CGFloat {
-        let count = max(1, apps.count)
-        let icons = CGFloat(count) * Constants.iconSize + CGFloat(count - 1) * Constants.iconSpacing
-        return max(Constants.dockPanelMinHeight, icons + Constants.panelVerticalPadding * 2)
-    }
-
-    func updateDockFrame(animated: Bool = true) {
-        guard let dw = dockWindow else { return }
-        let target = isDockOpen ? dockOpenFrame() : dockHiddenFrame()
+        let newFrame = CGRect(x: targetX, y: targetY, width: currentDockWidth, height: dockHeight)
+        
         if animated {
             UIView.animate(
-                withDuration: Constants.springResponse,
+                withDuration: Constants.standardAnimationDuration,
                 delay: 0,
-                usingSpringWithDamping: Constants.springDamping,
-                initialSpringVelocity: 0.3,
+                usingSpringWithDamping: Constants.standardSpringDamping,
+                initialSpringVelocity: Constants.standardSpringVelocity,
                 options: .curveEaseOut
-            ) { dw.frame = target }
+            ) {
+                hostingController.view.frame = newFrame
+                hostingController.view.alpha = targetOpacity
+            }
         } else {
-            dw.frame = target
+            hostingController.view.frame = newFrame
+            hostingController.view.alpha = targetOpacity
         }
     }
-
-    // MARK: - 독 열기 / 닫기
-    @objc public func openDock() {
-        guard !isDockOpen else { return }
-        DispatchQueue.main.async {
-            // 열기 전 숨김 위치로 snap (앱 수 변화로 높이가 달라졌을 수 있음)
-            self.dockWindow?.frame = self.dockHiddenFrame()
-            self.isDockOpen = true
-            self.updateDockFrame(animated: true)
-        }
-    }
-
-    @objc public func closeDock() {
-        guard isDockOpen else { return }
-        DispatchQueue.main.async {
-            self.isDockOpen = false
-            self.updateDockFrame(animated: true)
-        }
-    }
-
-    // MARK: - 바깥 탭 감지 UIWindow (독 열릴 때만 활성화)
-    // windowLevel .alert + 0.8 → 게스트 앱 위, 독 패널(.alert+0.9) 아래
-    // hitTest 에서 독 패널 frame 안 터치는 nil 반환 → 독 패널 터치가 우선됨
-    private func setupDismissWindow() {
-        guard dismissWindow == nil,
-              let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let win = keyWindow else { return }
-        let dmw = DismissTapWindow(windowScene: scene, manager: self)
-        dmw.windowLevel = UIWindow.Level.alert + 0.8
-        dmw.backgroundColor = .clear
-        dmw.isOpaque = false
-        dmw.frame = win.bounds
-        dmw.isHidden = true   // 기본은 숨김, openDock 시 isHidden=false
-        self.dismissWindow = dmw
-    }
-
-    private func showDismissOverlay() {
-        if dismissWindow == nil { setupDismissWindow() }
-        dismissWindow?.isHidden = false
-    }
-
-    private func hideDismissOverlay() {
-        dismissWindow?.isHidden = true
-    }
-
-    @objc func dismissOverlayTapped() {
-        closeDock()
-    }
-
-    // MARK: - 짧게: 모든 앱 최소화 + 앱 목록 표시
-    @objc public func minimizeAllAndShowAppList() {
-        DispatchQueue.main.async {
-            self.minimizeAllWindows()
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            NotificationCenter.default.post(
-                name: NSNotification.Name("LCShowAppListFromGesture"),
-                object: nil
-            )
-        }
-    }
-
-    // MARK: - 앱 전환
-    func switchToApp(uuid: String) {
-        closeDock()
-        DispatchQueue.main.asyncAfter(deadline: .now() + Constants.springResponse * 0.5) {
-            let _ = self.bringMultitaskViewToFront(uuid: uuid)
-        }
-    }
-
-    // MARK: - 앱 관리
+    
     @objc public func addRunningApp(_ appName: String, appUUID: String, view: UIView?) {
-        let info = AppInfoProvider.shared.findAppInfo(appName: appName, dataUUID: appUUID)
-        addRunningAppWithInfo(info, appUUID: appUUID, view: view)
+        let appInfo = AppInfoProvider.shared.findAppInfo(appName: appName, dataUUID: appUUID)
+        addRunningAppWithInfo(appInfo, appUUID: appUUID, view: view)
     }
-
-    @objc public func addRunningAppWithInfo(_ appInfo: LCAppInfo?, appUUID: String, view: UIView?) {
-        guard isDockEnabled() else { return }
-        guard !apps.contains(where: { $0.appUUID == appUUID }) else { return }
-        let name = appInfo?.displayName() ?? "Unknown App"
-        let model = DockAppModel(appName: name, appUUID: appUUID, appInfo: appInfo, view: view)
-        DispatchQueue.main.async {
-            self.apps.append(model)
-            if !self.isDockOpen { self.updateDockFrame(animated: false) }
-        }
-    }
-
+    
     @objc public func removeRunningApp(_ appUUID: String) {
         guard isDockEnabled() else { return }
+        
         DispatchQueue.main.async {
             self.apps.removeAll { $0.appUUID == appUUID }
-            if !self.isDockOpen { self.updateDockFrame(animated: false) }
+            
+            if self.apps.isEmpty {
+                self.hideDock()
+            } else if self.isVisible {
+                self.updateDockFrame()
+            }
         }
     }
-
-    @objc public func minimizeAllWindows(except: DecoratedAppSceneViewController? = nil) {
+    
+    @objc public func showDock() {
+        guard isDockEnabled() else { return }
+        guard !isVisible, let hostingController = hostingController else { return }
+        
+        guard let keyWindow = self.keyWindow else { return }
+        
         DispatchQueue.main.async {
-            self.apps.forEach { app in
-                if let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController, vc != except {
-                    app.view?.layer.removeAllAnimations()
-                    vc.minimizeWindow()
-                }
+            self.isVisible = true
+            
+            let screenBounds = keyWindow.bounds
+            let currentDockWidth = self.dockWidth
+            let dockHeight = Constants.minCollapsedHeight
+            
+            if hostingController.view.superview == nil {
+                keyWindow.addSubview(hostingController.view)
+                hostingController.view.frame = CGRect(
+                    x: screenBounds.width - currentDockWidth,
+                    y: (screenBounds.height - dockHeight) / 2,
+                    width: currentDockWidth,
+                    height: dockHeight
+                )
+            }
+            
+            self.updateDockFrame(animated: false)
+            
+            hostingController.view.alpha = 0
+            let initialScale = Constants.initialScale
+            hostingController.view.transform = CGAffineTransform(scaleX: initialScale, y: initialScale)
+            
+            UIView.animate(
+                withDuration: Constants.standardAnimationDuration,
+                delay: 0,
+                usingSpringWithDamping: Constants.showHideSpringDamping,
+                initialSpringVelocity: Constants.showHideSpringVelocity,
+                options: .curveEaseOut
+            ) {
+                hostingController.view.alpha = 1.0
+                hostingController.view.transform = .identity
+            }
+        }
+    }
+    
+    @objc public func hideDock() {
+        guard isVisible, let hostingController = hostingController else { return }
+        
+        DispatchQueue.main.async {
+            UIView.animate(
+                withDuration: Constants.standardAnimationDuration,
+                delay: 0,
+                usingSpringWithDamping: Constants.showHideSpringDamping,
+                initialSpringVelocity: Constants.showHideSpringVelocity,
+                options: .curveEaseOut
+            ) {
+                hostingController.view.alpha = 0
+                let finalScale = Constants.initialScale
+                hostingController.view.transform = CGAffineTransform(scaleX: finalScale, y: finalScale)
+            } completion: { _ in
+                self.isVisible = false
+                self.isExpanded = false
+                hostingController.view.transform = .identity
             }
         }
     }
 
-    // MARK: - 앱 최전면 전환
+    // MARK: - 제스처 처리
+    func handleShortSwipeGesture() {
+        // 짧은 스와이프 → 모든 앱 최소화하고 앱 목록으로 이동
+        DispatchQueue.main.async {
+            self.minimizeAllWindows()
+            NotificationCenter.default.post(name: NSNotification.Name("LCShowAppList"), object: nil)
+        }
+    }
+    
+    func expandDock() {
+        // 길게 누르기 → 독 확장
+        guard isVisible else { return }
+        DispatchQueue.main.async {
+            self.isExpanded = true
+            self.updateDockFrame()
+        }
+    }
+    
+    func collapseDock() {
+        // 확장된 상태에서 손을 뗄 때
+        guard isExpanded else { return }
+        DispatchQueue.main.async {
+            self.isExpanded = false
+            self.updateDockFrame()
+        }
+    }
+
     func bringMultitaskViewToFront(uuid: String, from center: CGPoint? = nil) -> Bool {
-        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return false }
-        guard let targetView = apps.first(where: { $0.appUUID == uuid })?.view else { return false }
+        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene else {
+            return false
+        }
+
+        for window in windowScene.windows {
+            if let targetView = findMultitaskView(in: window, withUUID: uuid) {
+                passURLSchemeToView(targetView)
+                animateViewAppearance(targetView, from: center, in: window)
+                return true
+            }
+        }
+        
+        return false
+    }
+
+    private func passURLSchemeToView(_ view: UIView) {
         if let launchUrl = UserDefaults.standard.string(forKey: "launchAppUrlScheme") {
             UserDefaults.standard.removeObject(forKey: "launchAppUrlScheme")
-            if let vc = targetView._viewDelegate() as? DecoratedAppSceneViewController {
-                vc.appSceneVC.openURLScheme(launchUrl)
+            if let decoratedVC = view._viewDelegate() as? DecoratedAppSceneViewController {
+                decoratedVC.appSceneVC.openURLScheme(launchUrl)
             }
         }
-        for window in windowScene.windows {
-            animateViewAppearance(targetView, from: center, in: window)
-        }
-        return true
     }
 
     private func animateViewAppearance(_ view: UIView, from center: CGPoint?, in window: UIWindow) {
         let isHidden = view.isHidden || view.alpha < 0.1
         let decoratedVC = view._viewDelegate() as? DecoratedAppSceneViewController
         let isMaximized = decoratedVC?.isMaximized ?? false
-
+        
         if UserDefaults.lcShared().bool(forKey: "LCMaxOneAppOnStage") && isMaximized {
             MultitaskDockManager.shared.minimizeAllWindows(except: decoratedVC)
         }
-
-        view.superview?.bringSubviewToFront(view)
-        window.superview?.bringSubviewToFront(window)
-
+        
         if isHidden {
             view.layer.removeAllAnimations()
+            view.isHidden = true
+            view.transform = .identity
             let origFrame = view.frame
             let pipManager = PiPManager.shared!
-            if let vc = view._viewDelegate(), pipManager.isPiP(withDecoratedVC: vc) {
+            if let decoratedVC = view._viewDelegate(), pipManager.isPiP(withDecoratedVC: decoratedVC) {
                 pipManager.stopPiP()
             } else {
-                view.isHidden = false
-                view.alpha = 0
                 view.transform = CGAffineTransform(scaleX: 0.1, y: 0.1)
-                let smaller = min(origFrame.size.width, origFrame.size.height)
+                view.isHidden = false
+                let smaller = min(view.frame.size.width, view.frame.size.height)
                 view.frame.size = CGSize(width: smaller, height: smaller)
-                if let c = center { view.center = c }
+                if let center { view.center = center }
             }
+            
+            self.bringViewToFront(view, in: window)
             UIView.animate(
-                withDuration: Constants.springResponse,
-                delay: 0, usingSpringWithDamping: 1.0,
-                initialSpringVelocity: 0, options: .curveEaseInOut
-            ) {
-                view.alpha = 1.0
-                view.transform = .identity
-                view.frame = origFrame
-            }
+                withDuration: Constants.standardAnimationDuration,
+                delay: 0,
+                usingSpringWithDamping: 1.0,
+                initialSpringVelocity: 0,
+                options: .curveEaseInOut,
+                animations: {
+                    view.alpha = 1.0
+                    view.transform = .identity
+                    view.frame = origFrame
+                }
+            )
         } else {
-            UIView.animate(withDuration: Constants.shortAnim1) {
-                view.transform = CGAffineTransform(scaleX: Constants.bringToFrontScale,
-                                                    y: Constants.bringToFrontScale)
-            } completion: { _ in
-                UIView.animate(withDuration: Constants.shortAnim2) { view.transform = .identity }
+            bringViewToFront(view, in: window)
+            
+            UIView.animate(withDuration: Constants.shortAnimationDuration1, animations: {
+                let scale = Constants.bringToFrontScale
+                view.transform = CGAffineTransform(scaleX: scale, y: scale)
+            }) { _ in
+                UIView.animate(withDuration: Constants.shortAnimationDuration2) {
+                    view.transform = .identity
+                }
             }
         }
     }
 
-    // MARK: - 하위호환 stubs
-    @objc public func showDock() {}
-    @objc public func hideDock() {}
-
-    @objc public func toggleDockCollapse() {
+    private func bringViewToFront(_ view: UIView, in window: UIWindow) {
+        if let superview = view.superview {
+            superview.bringSubviewToFront(view)
+        }
+        if let windowSuperview = window.superview {
+            windowSuperview.bringSubviewToFront(window)
+        }
+    }
+    
+    private func findMultitaskView(in view: UIView, withUUID uuid: String) -> UIView? {
+        apps.first { $0.appUUID == uuid }?.view
+    }
+    
+    @objc public func addRunningAppWithInfo(_ appInfo: LCAppInfo?, appUUID: String, view: UIView?) {
+        guard isDockEnabled() else { return }
+        
+        if apps.contains(where: { $0.appUUID == appUUID }) {
+            return
+        }
+        
+        let appName = appInfo?.displayName() ?? "Unknown App"
+        let appModel = DockAppModel(appName: appName, appUUID: appUUID, appInfo: appInfo, view: view)
+        
         DispatchQueue.main.async {
-            self.isCollapsed.toggle()
-            self.notifyDockCollapseChanged()
-        }
-    }
-
-    @objc public func notifyDockCollapseChanged() {
-        apps.forEach { app in
-            if let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController, vc.isMaximized {
-                vc.updateVerticalConstraints()
+            self.apps.append(appModel)
+            
+            if self.apps.count == 1 {
+                self.showDock()
+            } else if self.isVisible {
+                self.updateDockFrame()
             }
         }
     }
-
-    // MARK: - Helper
+    
+    @objc public func minimizeAllWindows(except: DecoratedAppSceneViewController? = nil) {
+        DispatchQueue.main.async {
+            self.apps.forEach { app in
+                if let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController,
+                   vc != except {
+                    app.view?.layer.removeAllAnimations()
+                    vc.minimizeWindow()
+                }
+            }
+        }
+    }
+    
     private func isDockEnabled() -> Bool {
-        let mode = MultitaskMode(rawValue: LCUtils.appGroupUserDefault.integer(forKey: "LCMultitaskMode")) ?? .virtualWindow
-        return mode == .virtualWindow
+        let multitaskMode = MultitaskMode(rawValue: LCUtils.appGroupUserDefault.integer(forKey: "LCMultitaskMode")) ?? .virtualWindow
+        return multitaskMode == .virtualWindow
     }
 }
 
-// MARK: - EdgeGestureWindow
-/// 게스트 앱이 keyWindow 위를 덮어도 항상 그 위에 있는 별도 UIWindow.
-/// windowLevel = .alert - 1 로 설정하여 게스트 앱 뷰보다 항상 위에 위치.
-/// hitTest를 통해 독이 열린 상태에서는 터치를 통과시키고,
-/// 닫힌 상태에서만 제스처 뷰가 터치를 처리.
+// MARK: - SwiftUI Dock View
 @available(iOS 16.0, *)
-class EdgeGestureWindow: UIWindow {
-    private weak var manager: MultitaskDockManager?
-    private let gestureView: EdgeGestureView
-
-    init(windowScene: UIWindowScene, manager: MultitaskDockManager) {
-        self.manager = manager
-        self.gestureView = EdgeGestureView(manager: manager)
-        super.init(windowScene: windowScene)
-        self.rootViewController = EdgeGestureHostViewController(contentView: gestureView)
-        self.backgroundColor = .clear
-        self.isOpaque = false
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    /// 독이 열려 있으면 nil(터치 통과).
-    /// 닫혀 있으면 오른쪽 변 80% 영역 안 터치만 수신, 그 외는 nil.
-    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        guard let mgr = manager, !mgr.isDockOpen else { return nil }
-        let bounds = self.bounds
-        let margin = bounds.height * MultitaskDockManager.Constants.gestureStripEdgeRatio
-        let stripX = bounds.width - MultitaskDockManager.Constants.gestureStripWidth
-        let activeRect = CGRect(x: stripX, y: margin,
-                                width: MultitaskDockManager.Constants.gestureStripWidth,
-                                height: bounds.height - margin * 2)
-        guard activeRect.contains(point) else { return nil }
-        return super.hitTest(point, with: event)
-    }
-}
-
-/// EdgeGestureWindow의 rootViewController - 배경 없이 gestureView만 표시
-@available(iOS 16.0, *)
-class EdgeGestureHostViewController: UIViewController {
-    private let contentView: UIView
-
-    init(contentView: UIView) {
-        self.contentView = contentView
-        super.init(nibName: nil, bundle: nil)
-    }
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        view.backgroundColor = .clear
-        view.addSubview(contentView)
-        contentView.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            contentView.topAnchor.constraint(equalTo: view.topAnchor),
-            contentView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            contentView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            contentView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-        ])
-    }
-}
-
-// MARK: - DismissTapWindow
-/// 독이 열렸을 때만 isHidden=false 가 되는 전체 화면 투명 UIWindow.
-/// 독 패널 frame 안 터치는 통과시키고 그 외 터치를 받아 독을 닫음.
-@available(iOS 16.0, *)
-class DismissTapWindow: UIWindow {
-    private weak var manager: MultitaskDockManager?
-
-    init(windowScene: UIWindowScene, manager: MultitaskDockManager) {
-        self.manager = manager
-        super.init(windowScene: windowScene)
-        let vc = UIViewController()
-        vc.view.backgroundColor = .clear
-        let tap = UITapGestureRecognizer(target: manager, action: #selector(MultitaskDockManager.dismissOverlayTapped))
-        vc.view.addGestureRecognizer(tap)
-        self.rootViewController = vc
-        self.backgroundColor = .clear
-        self.isOpaque = false
-    }
-    required init?(coder: NSCoder) { fatalError() }
-
-    /// 독 패널 frame 안 터치는 nil(통과) → 독 패널이 터치를 받음
-    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        guard let mgr = manager, mgr.isDockOpen else { return nil }
-        // dockWindow frame을 이 window 좌표계로 변환
-        if let dw = mgr.dockWindow {
-            let dockRect = self.convert(dw.frame, from: nil)
-            if dockRect.contains(point) { return nil }
-        }
-        return super.hitTest(point, with: event)
-    }
-}
-
-// MARK: - EdgeGestureView
-/// 오른쪽 변 80% 영역의 실제 제스처 처리 뷰.
-///
-/// iOS 홈 버튼 제스처와 동일한 방식:
-///   - 짧게 터치 후 떼기  (< 0.4초) → 모든 앱 최소화 + 앱 목록 표시
-///   - 길게 누르고 있기   (≥ 0.4초, 햅틱 발생) → 터치 떼면 독 열기
-@available(iOS 16.0, *)
-class EdgeGestureView: UIView {
-    private weak var manager: MultitaskDockManager?
-
-    private var touchBeganTime: TimeInterval = 0
-    private var longPressTriggered: Bool = false
-    /// 길게 누르기 임계값 도달 시 실행되는 타이머
-    private var longPressTimer: Timer?
-
-    init(manager: MultitaskDockManager) {
-        self.manager = manager
-        super.init(frame: .zero)
-        isUserInteractionEnabled = true
-        backgroundColor = .clear
-    }
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let t = touches.first else { return }
-        touchBeganTime = t.timestamp
-        longPressTriggered = false
-
-        // 길게 누르기 타이머 시작
-        longPressTimer?.invalidate()
-        longPressTimer = Timer.scheduledTimer(
-            withTimeInterval: MultitaskDockManager.Constants.longGestureMinDuration,
-            repeats: false
-        ) { [weak self] _ in
-            guard let self = self else { return }
-            // 임계값 도달 → 햅틱으로 피드백 (아직 열지는 않고 손가락 떼는 것을 기다림)
-            self.longPressTriggered = true
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        }
-    }
-
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        longPressTimer?.invalidate()
-        longPressTimer = nil
-        guard let mgr = manager else { return }
-
-        if longPressTriggered {
-            // 길게 눌렀다가 뗌 → 독 열기
-            mgr.openDock()
-        } else {
-            // 짧게 뗌 → 최소화 + 앱 목록
-            mgr.minimizeAllAndShowAppList()
-        }
-
-        longPressTriggered = false
-    }
-
-    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        longPressTimer?.invalidate()
-        longPressTimer = nil
-        longPressTriggered = false
-    }
-}
-
-// MARK: - DockPanelView (SwiftUI)
-@available(iOS 16.0, *)
-struct DockPanelView: View {
+public struct MultitaskDockSwiftView: View {
     @EnvironmentObject var dockManager: MultitaskDockManager
-
-    var body: some View {
-        VStack(spacing: MultitaskDockManager.Constants.iconSpacing) {
-            ForEach(dockManager.apps) { app in
-                DockIconView(app: app)
+    @State private var dragOffset = CGSize.zero
+    @State private var isLongPressing = false
+    @State private var gestureStartPoint: CGPoint = .zero
+    
+    public var body: some View {
+        GeometryReader { g in
+            VStack(spacing: 8) {
+                ForEach(dockManager.apps) { app in
+                    AppIconView(app: app)
+                }
             }
-        }
-        .padding(.vertical, MultitaskDockManager.Constants.panelVerticalPadding)
-        .padding(.horizontal, 10)
-        .frame(width: MultitaskDockManager.Constants.dockPanelWidth)
-        .modifier { content in
-            if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
-                content.glassEffect(.regular, in: .rect(cornerRadius: 20))
-            } else {
-                content
-                    .background(
-                        RoundedRectangle(cornerRadius: 20)
-                            .fill(.ultraThinMaterial)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 20)
-                                    .stroke(Color.white.opacity(0.25), lineWidth: 0.5)
-                            )
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 15)
+                    .fill(Color.black.opacity(0.7))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 15)
+                            .stroke(Color.white.opacity(0.3), lineWidth: 1)
                     )
-            }
+            )
+            .opacity(dockManager.isExpanded ? 1.0 : 0.4)
+            .offset(dragOffset)
+            .position(x: g.size.width / 2, y: g.size.height / 2)
         }
-        .shadow(color: .black.opacity(0.35), radius: 16, x: -4, y: 0)
-    }
-}
-
-// MARK: - DockIconView (SwiftUI)
-@available(iOS 16.0, *)
-struct DockIconView: View {
-    let app: DockAppModel
-    @EnvironmentObject var dockManager: MultitaskDockManager
-    @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) var darkModeIcon = false
-    @State private var appIcon: UIImage?
-    @State private var isLoading = true
-    @State private var isPressed = false
-
-    private let iconSize = MultitaskDockManager.Constants.iconSize
-
-    var body: some View {
-        Button {
-            dockManager.switchToApp(uuid: app.appUUID)
-        } label: {
-            VStack(spacing: 4) {
-                Group {
-                    if isLoading && appIcon == nil {
-                        LoadingIconView()
-                    } else if let icon = appIcon {
-                        IconImageView(icon: icon)
-                    } else {
-                        RoundedRectangle(cornerRadius: 13)
-                            .fill(Color.gray.opacity(0.35))
+        .gesture(
+            DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                if dragOffset == .zero {
+                    gestureStartPoint = value.startLocation
+                }
+                
+                // 제스처 시작 시간 기록
+                if dockManager.gestureStartTime == nil {
+                    dockManager.gestureStartTime = Date()
+                }
+                
+                // 이동 거리가 짧으면 길게 누르기 상태로 간주
+                let distance = sqrt(pow(value.translation.width, 2) + pow(value.translation.height, 2))
+                if distance < 10 {
+                    // 짧은 거리 내에서
+                    if let startTime = dockManager.gestureStartTime {
+                        let elapsed = Date().timeIntervalSince(startTime)
+                        if elapsed >= MultitaskDockManager.Constants.longPressThreshold {
+                            isLongPressing = true
+                            dockManager.expandDock()
+                        }
+                    }
+                } else {
+                    // 이동이 시작되면 길게 누르기 상태 해제
+                    isLongPressing = false
+                    dockManager.collapseDock()
+                }
+                
+                dragOffset = value.translation
+            }
+            .onEnded { value in
+                let distance = sqrt(pow(value.translation.width, 2) + pow(value.translation.height, 2))
+                
+                // 길게 누르기 상태였다가 끝났으면collaps
+                if isLongPressing {
+                    dockManager.collapseDock()
+                    isLongPressing = false
+                    dragOffset = .zero
+                    dockManager.gestureStartTime = nil
+                    return
+                }
+                
+                // 짧은 스와이프 감지 (거리가 짧고 시간이 길지 않았을 때)
+                if distance < 50, let startTime = dockManager.gestureStartTime {
+                    let elapsed = Date().timeIntervalSince(startTime)
+                    if elapsed < MultitaskDockManager.Constants.longPressThreshold {
+                        // 짧은 스와이프 → 앱 목록으로
+                        dockManager.handleShortSwipeGesture()
                     }
                 }
-                .frame(width: iconSize, height: iconSize)
-                .clipShape(RoundedRectangle(cornerRadius: 13))
-                .shadow(color: .black.opacity(0.3), radius: 4, x: 0, y: 2)
-                .scaleEffect(isPressed ? 0.88 : 1.0)
-                .animation(.easeInOut(duration: 0.08), value: isPressed)
-
-                Text(app.appName)
-                    .font(.system(size: 8.5, weight: .medium))
-                    .foregroundColor(.white.opacity(0.85))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(width: iconSize)
+                
+                dragOffset = .zero
+                dockManager.gestureStartTime = nil
             }
-        }
-        .buttonStyle(PlainButtonStyle())
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in isPressed = true }
-                .onEnded   { _ in isPressed = false }
         )
-        .onAppear { loadIcon() }
+        .animation(.spring(response: MultitaskDockManager.Constants.standardAnimationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping), value: dockManager.isExpanded)
     }
-
-    private func loadIcon() {
-        let key = "\(app.appName)_\(app.appUUID)"
-        if let cached = IconCacheManager.shared.getIcon(for: key) {
-            appIcon = cached; isLoading = false; return
-        }
-        DispatchQueue.global(qos: .userInitiated).async {
-            var img: UIImage?
-            if let info = self.app.appInfo {
-                img = info.iconIsDarkIcon(self.darkModeIcon)
-            } else if let found = AppInfoProvider.shared.findAppInfo(appName: self.app.appName, dataUUID: self.app.appUUID) {
-                img = found.iconIsDarkIcon(self.darkModeIcon)
-            }
-            DispatchQueue.main.async {
-                self.isLoading = false
-                if let i = img {
-                    self.appIcon = i
-                    IconCacheManager.shared.setIcon(i, for: key)
-                }
-            }
-        }
-    }
+    
+    public init() {}
 }
 
 // MARK: - Icon Cache Manager
@@ -770,23 +629,144 @@ class IconCacheManager {
     static let shared = IconCacheManager()
     private var cache: [String: UIImage] = [:]
     private let cacheQueue = DispatchQueue(label: "icon.cache.queue", attributes: .concurrent)
+    
     private init() {}
-
-    func getIcon(for key: String) -> UIImage? { cacheQueue.sync { cache[key] } }
-    func setIcon(_ icon: UIImage, for key: String) {
-        cacheQueue.async(flags: .barrier) { self.cache[key] = icon }
+    
+    func getIcon(for key: String) -> UIImage? {
+        return cacheQueue.sync {
+            return cache[key]
+        }
     }
-    func clearCache() { cacheQueue.async(flags: .barrier) { self.cache.removeAll() } }
+    
+    func setIcon(_ icon: UIImage, for key: String) {
+        cacheQueue.async(flags: .barrier) {
+            self.cache[key] = icon
+        }
+    }
+    
+    func clearCache() {
+        cacheQueue.async(flags: .barrier) {
+            self.cache.removeAll()
+        }
+    }
+}
+
+// MARK: - App Icon View
+@available(iOS 16.0, *)
+struct AppIconView: View {
+    let app: DockAppModel
+    @State private var isPressed = false
+    @State private var appIcon: UIImage?
+    @State private var isLoading = true
+    @EnvironmentObject var dockManager: MultitaskDockManager
+    @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) var darkModeIcon = false
+    
+    private var iconSize: CGFloat {
+        return dockManager.adaptiveIconSize
+    }
+    
+    var body: some View {
+        Group {
+            if isLoading && appIcon == nil {
+                LoadingIconView()
+            } else if let icon = appIcon {
+                IconImageView(icon: icon)
+            } else {
+                RoundedRectangle(cornerRadius: 16)
+                .fill(Color.gray.opacity(0.3))
+            }
+        }
+        .frame(width: iconSize, height: iconSize)
+        .shadow(color: .black.opacity(0.3), radius: 4, x: 0, y: 3)
+        .scaleEffect(isPressed ? 1.15 : 1.0)
+        .animation(.easeInOut(duration: 0.1), value: isPressed)
+        .onAppear {
+            loadAppIcon()
+        }
+        .onPressGesture(
+            onPress: { 
+                isPressed = true
+            },
+            onRelease: { location in 
+                isPressed = false
+                let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
+                impactFeedback.impactOccurred()
+                let _ = dockManager.bringMultitaskViewToFront(uuid: app.appUUID, from: location)
+            }
+        )
+        .contentShape(Rectangle())
+    }
+    
+    private func loadAppIcon() {
+        let cacheKey = "\(app.appName)_\(app.appUUID)"
+        
+        if let cachedIcon = IconCacheManager.shared.getIcon(for: cacheKey) {
+            self.appIcon = cachedIcon
+            self.isLoading = false
+            return
+        }
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            var finalIcon: UIImage?
+            
+            if let appInfo = self.app.appInfo {
+                finalIcon = appInfo.iconIsDarkIcon(darkModeIcon)
+            } else {
+                if let foundAppInfo = AppInfoProvider.shared.findAppInfo(appName: self.app.appName, dataUUID: self.app.appUUID) {
+                    finalIcon = foundAppInfo.iconIsDarkIcon(darkModeIcon)
+                }
+            }
+            
+            DispatchQueue.main.async {
+                self.isLoading = false
+                if let icon = finalIcon {
+                    self.appIcon = icon
+                    IconCacheManager.shared.setIcon(icon, for: cacheKey)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Press Gesture Helper
+extension View {
+    func onPressGesture(onPress: @escaping () -> Void, onRelease: @escaping (_ location: CGPoint) -> Void) -> some View {
+        self.simultaneousGesture(
+            DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                .onChanged { value in
+                    if value.translation == CGSize.zero {
+                        onPress()
+                    }
+                }
+                .onEnded { value in
+                    onRelease(value.startLocation)
+                }
+        )
+    }
 }
 
 // MARK: - Loading Icon View
 struct LoadingIconView: View {
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 13).fill(Color.gray.opacity(0.3))
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.gray.opacity(0.3))
+            
             ProgressView()
                 .progressViewStyle(CircularProgressViewStyle(tint: .white))
                 .scaleEffect(1.2)
         }
+    }
+}
+
+// MARK: - Icon Image View
+struct IconImageView: View {
+    let icon: UIImage
+    
+    var body: some View {
+        Image(uiImage: icon)
+            .resizable()
+            .aspectRatio(contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: 16))
     }
 }
