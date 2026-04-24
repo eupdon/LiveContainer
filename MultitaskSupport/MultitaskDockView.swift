@@ -117,15 +117,15 @@ class AppInfoProvider {
 
     @objc public var windowHostingView = VirtualWindowsHostView()
 
-    /// 독 패널을 담는 호스팅 컨트롤러 (기본: 화면 오른쪽 밖에 위치)
+    /// 독 패널 전용 UIWindow — 게스트 앱 window보다 높은 레벨로 항상 위에 표시
+    private var dockWindow: UIWindow?
     internal var dockHostingController: UIHostingController<AnyView>?
 
-    /// 제스처 전용 별도 UIWindow
-    /// 게스트 앱이 keyWindow 위에 올라와도 이 window는 항상 최상단에 위치함
+    /// 제스처 전용 UIWindow — 모든 window 중 최상단
     private var gestureWindow: EdgeGestureWindow?
 
-    /// 독이 열렸을 때 바깥 탭으로 닫는 투명 오버레이
-    private var dismissOverlay: UIView?
+    /// 독 열림 시에만 isHidden=false 로 전환되는 바깥 탭 감지용 UIWindow
+    private var dismissWindow: UIWindow?
 
     /// Combine subscriptions
     private var cancellables = Set<AnyCancellable>()
@@ -203,16 +203,27 @@ class AppInfoProvider {
     }
 
     // MARK: - 독 패널 setup
+    // 독 패널은 별도 UIWindow 로 올려서 게스트 앱 window 위에 항상 위치하게 함.
+    // windowLevel: .alert + 0.9 (gestureWindow .alert+1.0 보다 살짝 낮아 제스처가 우선)
     private func setupDockPanel() {
         DispatchQueue.main.async {
+            guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
+
             let view = AnyView(DockPanelView().environmentObject(self))
             let hc = UIHostingController(rootView: view)
             hc.view.backgroundColor = .clear
             hc.view.isUserInteractionEnabled = true
             self.dockHostingController = hc
-            guard let win = self.keyWindow else { return }
-            win.addSubview(hc.view)
-            hc.view.frame = self.dockHiddenFrame()
+
+            let dw = UIWindow(windowScene: scene)
+            dw.windowLevel = UIWindow.Level.alert + 0.9
+            dw.backgroundColor = .clear
+            dw.isOpaque = false
+            dw.rootViewController = hc
+            // 처음에는 화면 밖 위치로 frame 설정
+            dw.frame = self.dockHiddenFrame()
+            dw.isHidden = false
+            self.dockWindow = dw
         }
     }
 
@@ -223,9 +234,9 @@ class AppInfoProvider {
         DispatchQueue.main.async {
             guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
             let gw = EdgeGestureWindow(windowScene: scene, manager: self)
-            // .alert + 1 → 게스트 앱 UIWindow를 포함한 모든 앱 레이어 위에 위치
-            // 시스템 알림(alert)보다도 위지만 제스처 영역만 터치를 수신하므로 UX 방해 없음
-            gw.windowLevel = UIWindow.Level.alert + 1
+            // .alert + 1.0 → 독 window(.alert+0.9)와 dismiss window(.alert+0.8) 모두 위
+            // 제스처 window hitTest에서 영역 밖 터치는 nil 반환하므로 앱 조작 방해 없음
+            gw.windowLevel = UIWindow.Level.alert + 1.0
             gw.backgroundColor = .clear
             gw.isHidden = false
             self.gestureWindow = gw
@@ -233,17 +244,19 @@ class AppInfoProvider {
         }
     }
 
-    /// 오른쪽 변 80% 영역 프레임 갱신
+    /// 제스처 window를 전체 화면 크기로 유지.
+    /// 실제 터치 수신 영역은 EdgeGestureWindow.hitTest 에서 오른쪽 변 80%로 필터링.
     func updateGestureWindowFrame() {
         guard let win = keyWindow, let gw = gestureWindow else { return }
-        let bounds = win.bounds
-        let margin = bounds.height * Constants.gestureStripEdgeRatio
-        gw.frame = CGRect(
-            x: bounds.width - Constants.gestureStripWidth,
-            y: margin,
-            width: Constants.gestureStripWidth,
-            height: bounds.height - margin * 2
-        )
+        gw.frame = win.bounds
+        // dockWindow도 함께 갱신
+        if let dw = dockWindow {
+            dw.frame = isDockOpen ? dockOpenFrame() : dockHiddenFrame()
+        }
+        // dismissWindow도 함께 갱신
+        if let dmw = dismissWindow {
+            dmw.frame = win.bounds
+        }
     }
 
     // MARK: - isDockOpen 구독 → dismissOverlay 관리
@@ -283,7 +296,7 @@ class AppInfoProvider {
     }
 
     func updateDockFrame(animated: Bool = true) {
-        guard let hc = dockHostingController else { return }
+        guard let dw = dockWindow else { return }
         let target = isDockOpen ? dockOpenFrame() : dockHiddenFrame()
         if animated {
             UIView.animate(
@@ -292,9 +305,9 @@ class AppInfoProvider {
                 usingSpringWithDamping: Constants.springDamping,
                 initialSpringVelocity: 0.3,
                 options: .curveEaseOut
-            ) { hc.view.frame = target }
+            ) { dw.frame = target }
         } else {
-            hc.view.frame = target
+            dw.frame = target
         }
     }
 
@@ -302,12 +315,10 @@ class AppInfoProvider {
     @objc public func openDock() {
         guard !isDockOpen else { return }
         DispatchQueue.main.async {
-            self.dockHostingController?.view.frame = self.dockHiddenFrame()
+            // 열기 전 숨김 위치로 snap (앱 수 변화로 높이가 달라졌을 수 있음)
+            self.dockWindow?.frame = self.dockHiddenFrame()
             self.isDockOpen = true
             self.updateDockFrame(animated: true)
-            if let win = self.keyWindow, let hc = self.dockHostingController {
-                win.bringSubviewToFront(hc.view)
-            }
         }
     }
 
@@ -319,28 +330,32 @@ class AppInfoProvider {
         }
     }
 
-    // MARK: - 바깥 탭 오버레이
+    // MARK: - 바깥 탭 감지 UIWindow (독 열릴 때만 활성화)
+    // windowLevel .alert + 0.8 → 게스트 앱 위, 독 패널(.alert+0.9) 아래
+    // hitTest 에서 독 패널 frame 안 터치는 nil 반환 → 독 패널 터치가 우선됨
+    private func setupDismissWindow() {
+        guard dismissWindow == nil,
+              let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let win = keyWindow else { return }
+        let dmw = DismissTapWindow(windowScene: scene, manager: self)
+        dmw.windowLevel = UIWindow.Level.alert + 0.8
+        dmw.backgroundColor = .clear
+        dmw.isOpaque = false
+        dmw.frame = win.bounds
+        dmw.isHidden = true   // 기본은 숨김, openDock 시 isHidden=false
+        self.dismissWindow = dmw
+    }
+
     private func showDismissOverlay() {
-        guard dismissOverlay == nil, let win = keyWindow else { return }
-        let overlay = UIView(frame: win.bounds)
-        overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        overlay.backgroundColor = .clear
-        let tap = UITapGestureRecognizer(target: self, action: #selector(dismissOverlayTapped))
-        overlay.addGestureRecognizer(tap)
-        if let hc = dockHostingController {
-            win.insertSubview(overlay, belowSubview: hc.view)
-        } else {
-            win.addSubview(overlay)
-        }
-        dismissOverlay = overlay
+        if dismissWindow == nil { setupDismissWindow() }
+        dismissWindow?.isHidden = false
     }
 
     private func hideDismissOverlay() {
-        dismissOverlay?.removeFromSuperview()
-        dismissOverlay = nil
+        dismissWindow?.isHidden = true
     }
 
-    @objc private func dismissOverlayTapped() {
+    @objc func dismissOverlayTapped() {
         closeDock()
     }
 
@@ -508,20 +523,25 @@ class EdgeGestureWindow: UIWindow {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    /// 독이 열려 있거나 제스처 영역 밖이면 터치를 통과시킴
+    /// 독이 열려 있으면 nil(터치 통과).
+    /// 닫혀 있으면 오른쪽 변 80% 영역 안 터치만 수신, 그 외는 nil.
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         guard let mgr = manager, !mgr.isDockOpen else { return nil }
-        guard let gvc = rootViewController as? EdgeGestureHostViewController else { return nil }
-        let converted = gvc.contentView.convert(point, from: self)
-        guard gvc.contentView.bounds.contains(converted) else { return nil }
-        return gvc.contentView
+        let bounds = self.bounds
+        let margin = bounds.height * MultitaskDockManager.Constants.gestureStripEdgeRatio
+        let stripX = bounds.width - MultitaskDockManager.Constants.gestureStripWidth
+        let activeRect = CGRect(x: stripX, y: margin,
+                                width: MultitaskDockManager.Constants.gestureStripWidth,
+                                height: bounds.height - margin * 2)
+        guard activeRect.contains(point) else { return nil }
+        return super.hitTest(point, with: event)
     }
 }
 
 /// EdgeGestureWindow의 rootViewController - 배경 없이 gestureView만 표시
 @available(iOS 16.0, *)
 class EdgeGestureHostViewController: UIViewController {
-    let contentView: UIView  // EdgeGestureWindow.hitTest에서 접근
+    private let contentView: UIView
 
     init(contentView: UIView) {
         self.contentView = contentView
@@ -540,6 +560,38 @@ class EdgeGestureHostViewController: UIViewController {
             contentView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             contentView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
+    }
+}
+
+// MARK: - DismissTapWindow
+/// 독이 열렸을 때만 isHidden=false 가 되는 전체 화면 투명 UIWindow.
+/// 독 패널 frame 안 터치는 통과시키고 그 외 터치를 받아 독을 닫음.
+@available(iOS 16.0, *)
+class DismissTapWindow: UIWindow {
+    private weak var manager: MultitaskDockManager?
+
+    init(windowScene: UIWindowScene, manager: MultitaskDockManager) {
+        self.manager = manager
+        super.init(windowScene: windowScene)
+        let vc = UIViewController()
+        vc.view.backgroundColor = .clear
+        let tap = UITapGestureRecognizer(target: manager, action: #selector(MultitaskDockManager.dismissOverlayTapped))
+        vc.view.addGestureRecognizer(tap)
+        self.rootViewController = vc
+        self.backgroundColor = .clear
+        self.isOpaque = false
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// 독 패널 frame 안 터치는 nil(통과) → 독 패널이 터치를 받음
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        guard let mgr = manager, mgr.isDockOpen else { return nil }
+        // dockWindow frame을 이 window 좌표계로 변환
+        if let dw = mgr.dockWindow {
+            let dockRect = self.convert(dw.frame, from: nil)
+            if dockRect.contains(point) { return nil }
+        }
+        return super.hitTest(point, with: event)
     }
 }
 
