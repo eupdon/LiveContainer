@@ -139,9 +139,6 @@ class AppInfoProvider {
     // 독이 전체 표시되어 있는지 (길게 누를 때만 true)
     @Published var isExpanded: Bool = false
     
-    // 제스처 시간 추적
-    private var gestureStartTime: Date?
-    
     @objc public var windowHostingView = VirtualWindowsHostView()
     internal var hostingController: UIHostingController<AnyView>?
 
@@ -379,7 +376,7 @@ class AppInfoProvider {
     }
 
     // MARK: - 제스처 처리
-    func handleShortSwipeGesture() {
+    @objc func handleShortSwipeGesture() {
         // 짧은 스와이프 → 모든 앱 최소화하고 앱 목록으로 이동
         DispatchQueue.main.async {
             self.minimizeAllWindows()
@@ -387,7 +384,7 @@ class AppInfoProvider {
         }
     }
     
-    func expandDock() {
+    @objc func expandDock() {
         // 길게 누르기 → 독 확장
         guard isVisible else { return }
         DispatchQueue.main.async {
@@ -396,9 +393,9 @@ class AppInfoProvider {
         }
     }
     
-    func collapseDock() {
+    @objc func collapseDock() {
         // 확장된 상태에서 손을 뗄 때
-        guard isExpanded else { return }
+        guard self.isExpanded else { return }
         DispatchQueue.main.async {
             self.isExpanded = false
             self.updateDockFrame()
@@ -541,6 +538,7 @@ public struct MultitaskDockSwiftView: View {
     @State private var dragOffset = CGSize.zero
     @State private var isLongPressing = false
     @State private var gestureStartPoint: CGPoint = .zero
+    @State private var gestureStartTime: Date?
     
     public var body: some View {
         GeometryReader { g in
@@ -570,15 +568,15 @@ public struct MultitaskDockSwiftView: View {
                 }
                 
                 // 제스처 시작 시간 기록
-                if dockManager.gestureStartTime == nil {
-                    dockManager.gestureStartTime = Date()
+                if gestureStartTime == nil {
+                    gestureStartTime = Date()
                 }
                 
                 // 이동 거리가 짧으면 길게 누르기 상태로 간주
                 let distance = sqrt(pow(value.translation.width, 2) + pow(value.translation.height, 2))
                 if distance < 10 {
                     // 짧은 거리 내에서
-                    if let startTime = dockManager.gestureStartTime {
+                    if let startTime = gestureStartTime {
                         let elapsed = Date().timeIntervalSince(startTime)
                         if elapsed >= MultitaskDockManager.Constants.longPressThreshold {
                             isLongPressing = true
@@ -596,17 +594,17 @@ public struct MultitaskDockSwiftView: View {
             .onEnded { value in
                 let distance = sqrt(pow(value.translation.width, 2) + pow(value.translation.height, 2))
                 
-                // 길게 누르기 상태였다가 끝났으면collaps
+                // 길게 누르기 상태였다가 끝났으면 collapse
                 if isLongPressing {
                     dockManager.collapseDock()
                     isLongPressing = false
                     dragOffset = .zero
-                    dockManager.gestureStartTime = nil
+                    gestureStartTime = nil
                     return
                 }
                 
                 // 짧은 스와이프 감지 (거리가 짧고 시간이 길지 않았을 때)
-                if distance < 50, let startTime = dockManager.gestureStartTime {
+                if distance < 50, let startTime = gestureStartTime {
                     let elapsed = Date().timeIntervalSince(startTime)
                     if elapsed < MultitaskDockManager.Constants.longPressThreshold {
                         // 짧은 스와이프 → 앱 목록으로
@@ -615,7 +613,7 @@ public struct MultitaskDockSwiftView: View {
                 }
                 
                 dragOffset = .zero
-                dockManager.gestureStartTime = nil
+                gestureStartTime = nil
             }
         )
         .animation(.spring(response: MultitaskDockManager.Constants.standardAnimationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping), value: dockManager.isExpanded)
