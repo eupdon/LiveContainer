@@ -756,15 +756,3 @@ struct LoadingIconView: View {
         }
     }
 }
-
-// MARK: - Icon Image View
-struct IconImageView: View {
-    let icon: UIImage
-    
-    var body: some View {
-        Image(uiImage: icon)
-            .resizable()
-            .aspectRatio(contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: 16))
-    }
-}
