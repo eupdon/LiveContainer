@@ -546,12 +546,68 @@ public struct MultitaskDockSwiftView: View {
     
     public var body: some View {
         GeometryReader { g in
-            VStack(spacing: 8) {
-                ForEach(dockManager.apps) { app in
-                    AppIconView(app: app)
+            ZStack {
+                VStack(spacing: 8) {
+                    ForEach(dockManager.apps) { app in
+                        AppIconView(app: app)
+                    }
                 }
+                .padding(8)
+                
+                Color.clear
+                    .contentShape(Rectangle())
+                    .allowsHitTesting(true)
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            if dragOffset == .zero {
+                                gestureStartPoint = value.startLocation
+                            }
+                            
+                            if gestureStartTime == nil {
+                                gestureStartTime = Date()
+                            }
+                            
+                            let distance = sqrt(pow(value.translation.width, 2) + pow(value.translation.height, 2))
+                            if distance < 10 {
+                                if let startTime = gestureStartTime {
+                                    let elapsed = Date().timeIntervalSince(startTime)
+                                    if elapsed >= MultitaskDockManager.Constants.longPressThreshold {
+                                        isLongPressing = true
+                                        dockManager.expandDock()
+                                    }
+                                }
+                            } else {
+                                isLongPressing = false
+                                dockManager.collapseDock()
+                            }
+                            
+                            dragOffset = value.translation
+                        }
+                        .onEnded { value in
+                            let distance = sqrt(pow(value.translation.width, 2) + pow(value.translation.height, 2))
+                            
+                            if isLongPressing {
+                                dockManager.collapseDock()
+                                isLongPressing = false
+                                dragOffset = .zero
+                                gestureStartTime = nil
+                                return
+                            }
+                            
+                            if distance < 50, let startTime = gestureStartTime {
+                                let elapsed = Date().timeIntervalSince(startTime)
+                                if elapsed < MultitaskDockManager.Constants.longPressThreshold {
+                                    dockManager.handleShortSwipeGesture()
+                                }
+                            }
+                            
+                            dragOffset = .zero
+                            gestureStartTime = nil
+                        }
+                    )
             }
-            .padding(8)
+            .frame(width: g.size.width, height: g.size.height)
             .background(
                 RoundedRectangle(cornerRadius: 15)
                     .fill(Color.black.opacity(0.7))
@@ -564,62 +620,6 @@ public struct MultitaskDockSwiftView: View {
             .offset(dragOffset)
             .position(x: g.size.width / 2, y: g.size.height / 2)
         }
-        .gesture(
-            DragGesture(minimumDistance: 0)
-            .onChanged { value in
-                if dragOffset == .zero {
-                    gestureStartPoint = value.startLocation
-                }
-                
-                // 제스처 시작 시간 기록
-                if gestureStartTime == nil {
-                    gestureStartTime = Date()
-                }
-                
-                // 이동 거리가 짧으면 길게 누르기 상태로 간주
-                let distance = sqrt(pow(value.translation.width, 2) + pow(value.translation.height, 2))
-                if distance < 10 {
-                    // 짧은 거리 내에서
-                    if let startTime = gestureStartTime {
-                        let elapsed = Date().timeIntervalSince(startTime)
-                        if elapsed >= MultitaskDockManager.Constants.longPressThreshold {
-                            isLongPressing = true
-                            dockManager.expandDock()
-                        }
-                    }
-                } else {
-                    // 이동이 시작되면 길게 누르기 상태 해제
-                    isLongPressing = false
-                    dockManager.collapseDock()
-                }
-                
-                dragOffset = value.translation
-            }
-            .onEnded { value in
-                let distance = sqrt(pow(value.translation.width, 2) + pow(value.translation.height, 2))
-                
-                // 길게 누르기 상태였다가 끝났으면 collapse
-                if isLongPressing {
-                    dockManager.collapseDock()
-                    isLongPressing = false
-                    dragOffset = .zero
-                    gestureStartTime = nil
-                    return
-                }
-                
-                // 짧은 스와이프 감지 (거리가 짧고 시간이 길지 않았을 때)
-                if distance < 50, let startTime = gestureStartTime {
-                    let elapsed = Date().timeIntervalSince(startTime)
-                    if elapsed < MultitaskDockManager.Constants.longPressThreshold {
-                        // 짧은 스와이프 → 앱 목록으로
-                        dockManager.handleShortSwipeGesture()
-                    }
-                }
-                
-                dragOffset = .zero
-                gestureStartTime = nil
-            }
-        )
         .animation(.spring(response: MultitaskDockManager.Constants.standardAnimationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping), value: dockManager.isExpanded)
     }
     
@@ -660,6 +660,7 @@ struct AppIconView: View {
     @State private var isPressed = false
     @State private var appIcon: UIImage?
     @State private var isLoading = true
+    @State private var gestureStartTime: Date?
     @EnvironmentObject var dockManager: MultitaskDockManager
     @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) var darkModeIcon = false
     
@@ -691,12 +692,37 @@ struct AppIconView: View {
             },
             onRelease: { location in 
                 isPressed = false
+                
+                // 길게 누른 경우 → 독 확장
+                if let startTime = self.gestureStartTime {
+                    let elapsed = Date().timeIntervalSince(startTime)
+                    if elapsed >= 0.5 {
+                        // 길게 누름 → 독 확장
+                        dockManager.expandDock()
+                        return
+                    }
+                }
+                
                 let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
                 impactFeedback.impactOccurred()
                 let _ = dockManager.bringMultitaskViewToFront(uuid: app.appUUID, from: location)
             }
         )
-        .contentShape(Rectangle())
+        .onLongPressGesture(
+            minimumDuration: 0.5,
+            pressing: { _ in },
+            perform: {
+                dockManager.expandDock()
+            }
+        )
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    if self.gestureStartTime == nil {
+                        self.gestureStartTime = Date()
+                    }
+                }
+        )
     }
     
     private func loadAppIcon() {
