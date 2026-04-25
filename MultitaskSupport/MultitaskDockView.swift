@@ -390,13 +390,8 @@ class AppInfoProvider {
         let safeAreaMinY = self.safeAreaInsets.top + Constants.dockVerticalMargin
         let safeAreaMaxY = screenHeight - self.safeAreaInsets.bottom - dockHeight - Constants.dockVerticalMargin
         
-        if currentFrame.height > 0 {
-            let desiredY = currentFrame.midY - dockHeight / 2
-            return max(safeAreaMinY, min(safeAreaMaxY, desiredY))
-        } else {
-            let safeAreaCenterY = safeAreaMinY + (safeAreaMaxY - safeAreaMinY) / 2
-            return max(safeAreaMinY, min(safeAreaMaxY, safeAreaCenterY - dockHeight / 2))
-        }
+        let safeAreaCenterY = safeAreaMinY + (safeAreaMaxY - safeAreaMinY) / 2
+        return safeAreaCenterY - dockHeight / 2
     }
 
     private func applyNewFrame(_ newFrame: CGRect, for hostingController: UIHostingController<AnyView>, animated: Bool) {
@@ -435,48 +430,6 @@ class AppInfoProvider {
     }
     
     @objc public func showDock() {
-        guard isDockEnabled() else { return }
-        guard !isVisible, let hostingController = hostingController else { return }
-        
-        guard let keyWindow = self.keyWindow else { return }
-        
-        DispatchQueue.main.async {
-            self.isVisible = true
-            
-            let screenBounds = keyWindow.bounds
-            let currentDockWidth = self.dockWidth
-            let initialHeight = Constants.initialDockShowHeight
-            
-            // If not already in view hierarchy, add it
-            if hostingController.view.superview == nil {
-                keyWindow.addSubview(hostingController.view)
-                hostingController.view.frame = CGRect(
-                    x: screenBounds.width - currentDockWidth,
-                    y: (screenBounds.height - initialHeight) / 2,
-                    width: currentDockWidth,
-                    height: initialHeight
-                )
-            }
-            
-            self.updateDockFrame(animated: false) 
-            
-            self.setupEdgeGestureRecognizers()
-            
-            hostingController.view.alpha = 0
-            let initialScale = Constants.initialScale
-            hostingController.view.transform = CGAffineTransform(scaleX: initialScale, y: initialScale)
-            
-            UIView.animate(
-                withDuration: Constants.standardAnimationDuration,
-                delay: 0,
-                usingSpringWithDamping: Constants.showHideSpringDamping,
-                initialSpringVelocity: Constants.showHideSpringVelocity,
-                options: .curveEaseOut
-            ) {
-                hostingController.view.alpha = 1
-                hostingController.view.transform = .identity
-            }
-        }
     }
     
     @objc public func hideDock() {
@@ -696,49 +649,11 @@ class AppInfoProvider {
         }
     }
     
-    @objc public func showDockFromHidden() {
-        DispatchQueue.main.async {
-            self.isDockHidden = false
-            self.updateDockFrame()
-            self.setupEdgeGestureRecognizers()
-        }
-    }
-    
-    @objc public func hideDockToSide() {
-        DispatchQueue.main.async {
-            self.isDockHidden = true
-            self.updateDockFrame()
-            self.setupEdgeGestureRecognizers()
-        }
-    }
-    
     // Add edge gesture recognition areas when dock is hidden
     private func setupEdgeGestureRecognizers() {
-        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let keyWindow = windowScene.windows.first else { return }
-        
-        keyWindow.gestureRecognizers?.removeAll { gesture in
-            return gesture is UITapGestureRecognizer || gesture is UIScreenEdgePanGestureRecognizer
-        }
-        
-        if isDockHidden {
-            let rightEdgeGesture = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(handleEdgeSwipe(_:)))
-            rightEdgeGesture.edges = .right
-            keyWindow.addGestureRecognizer(rightEdgeGesture)
-        }
     }
     
     @objc private func handleEdgeSwipe(_ gesture: UIScreenEdgePanGestureRecognizer) {
-        guard isDockHidden, gesture.state == .began || gesture.state == .changed else {
-            return
-        }
-        
-        let translation = gesture.translation(in: gesture.view)
-        let swipeDistance = abs(translation.x)
-        
-        if swipeDistance > Constants.edgeSwipeThreshold {
-            showDockFromHidden()
-        }
     }
     
     // MARK: - Multitask Mode Check
@@ -752,16 +667,6 @@ class AppInfoProvider {
 @available(iOS 16.0, *)
 public struct MultitaskDockSwiftView: View {
     @EnvironmentObject var dockManager: MultitaskDockManager
-    @State private var dragOffset = CGSize.zero
-    @State private var isMoving: Bool = false
-    @AppStorage("LCHideCollapsedDock", store: LCUtils.appGroupUserDefault) var hideCollapsedDock: Bool = false
-    
-    // Calculate dynamic padding based on user settings
-    private var dynamicPadding: CGFloat {
-        let basePadding: CGFloat = 4
-        let extraPadding = (dockManager.dockWidth - MultitaskDockManager.Constants.defaultDockWidth) * 0.2
-        return max(basePadding, basePadding + extraPadding)
-    }
     
     public var body: some View {
         GeometryReader { g in
@@ -789,76 +694,29 @@ public struct MultitaskDockSwiftView: View {
                     }
                 }
             }
-            .padding(dynamicPadding)
+            .padding(4)
             .modifier { content in
                 if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
                     content.glassEffect(.regular, in: .rect(cornerRadius: 15))
                 } else {
                     content.background(
                         RoundedRectangle(cornerRadius: 15)
-                            .fill(Color.black.opacity(dockManager.isDockHidden ? 0.3 : 0.7))
+                            .fill(Color.black.opacity(0.3))
                             .overlay(
                                 RoundedRectangle(cornerRadius: 15)
-                                    .stroke(Color.white.opacity(dockManager.isDockHidden ? 0.1 : 0.3), lineWidth: 1)
+                                    .stroke(Color.white.opacity(0.1), lineWidth: 1)
                             )
                     )
                 }
             }
             .scaleEffect(dockManager.isVisible ? 1.0 : 0.8)
-            .opacity(dockManager.isDockHidden ? (hideCollapsedDock && dockManager.isCollapsed ? 0.01 : 0.4) : 1.0)
-            .offset(dragOffset)
+            .opacity(0.4)
             .position(x: g.size.width / 2, y: g.size.height / 2)
         }
 
 
 
         .ignoresSafeArea()
-        .contentShape(Rectangle())
-        .onTapGesture {
-            if !dockManager.isDockHidden {
-                dockManager.hideDock()
-            }
-        }
-        .gesture(
-            DragGesture(minimumDistance: 5)
-            .onChanged { value in
-                self.isMoving = true
-                self.dragOffset = value.translation
-            }
-            .onEnded { value in
-                let screenBounds = dockManager.keyWindow!.bounds
-                let currentPhysicalFrame = (dockManager.hostingController?.view.frame ?? .zero).offsetBy(dx: self.dragOffset.width, dy: self.dragOffset.height)
-                
-                let safeAreaInsets = dockManager.safeAreaInsets
-                let dockVerticalMargin = MultitaskDockManager.Constants.dockVerticalMargin
-                let minY = safeAreaInsets.top + dockVerticalMargin
-                let maxY = screenBounds.height - safeAreaInsets.bottom - currentPhysicalFrame.height - dockVerticalMargin
-                let targetY = max(minY, min(maxY, currentPhysicalFrame.origin.y))
-                
-                let targetX = dockManager.calculateTargetX(isDockHidden: dockManager.isDockHidden, dockWidth: currentPhysicalFrame.width, screenWidth: screenBounds.width)
-                
-                let finalPhysicalPosition = CGPoint(x: targetX, y: targetY)
-                
-                let newOffset = CGSize(
-                    width: finalPhysicalPosition.x - (dockManager.hostingController?.view.frame.origin.x ?? 0),
-                    height: finalPhysicalPosition.y - (dockManager.hostingController?.view.frame.origin.y ?? 0)
-                )
-                
-                let animationDuration = MultitaskDockManager.Constants.longAnimationDuration
-                
-                withAnimation(.spring(response: animationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping)) {
-                    self.dragOffset = newOffset
-                }
-                
-                DispatchQueue.main.asyncAfter(deadline: .now() + animationDuration) {
-                    dockManager.updateFrameAfterAnimation(finalOffset: newOffset)
-                    
-                    self.dragOffset = .zero
-                    
-                    self.isMoving = false
-                }
-            }
-        )
         .animation(.spring(response: MultitaskDockManager.Constants.standardAnimationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping), value: dockManager.isCollapsed)
         .animation(.spring(response: MultitaskDockManager.Constants.standardAnimationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping), value: dockManager.isDockHidden)
         .animation(.spring(response: MultitaskDockManager.Constants.longAnimationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping), value: dockManager.dockWidth)
