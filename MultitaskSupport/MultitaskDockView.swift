@@ -430,6 +430,45 @@ class AppInfoProvider {
     }
     
     @objc public func showDock() {
+        guard isDockEnabled() else { return }
+        guard !isVisible, let hostingController = hostingController else { return }
+        
+        guard let keyWindow = self.keyWindow else { return }
+        
+        DispatchQueue.main.async {
+            self.isVisible = true
+            
+            let screenBounds = keyWindow.bounds
+            let currentDockWidth = self.dockWidth
+            let initialHeight = Constants.initialDockShowHeight
+            
+            if hostingController.view.superview == nil {
+                keyWindow.addSubview(hostingController.view)
+                hostingController.view.frame = CGRect(
+                    x: screenBounds.width - currentDockWidth,
+                    y: (screenBounds.height - initialHeight) / 2,
+                    width: currentDockWidth,
+                    height: initialHeight
+                )
+            }
+            
+            self.updateDockFrame(animated: false) 
+            
+            hostingController.view.alpha = 0
+            let initialScale = Constants.initialScale
+            hostingController.view.transform = CGAffineTransform(scaleX: initialScale, y: initialScale)
+            
+            UIView.animate(
+                withDuration: Constants.standardAnimationDuration,
+                delay: 0,
+                usingSpringWithDamping: Constants.showHideSpringDamping,
+                initialSpringVelocity: Constants.showHideSpringVelocity,
+                options: .curveEaseOut
+            ) {
+                hostingController.view.alpha = 1
+                hostingController.view.transform = .identity
+            }
+        }
     }
     
     @objc public func hideDock() {
@@ -710,7 +749,7 @@ public struct MultitaskDockSwiftView: View {
                 }
             }
             .scaleEffect(dockManager.isVisible ? 1.0 : 0.8)
-            .opacity(0.4)
+            .opacity(dockManager.apps.isEmpty ? 0.01 : 0.4)
             .position(x: g.size.width / 2, y: g.size.height / 2)
         }
 
