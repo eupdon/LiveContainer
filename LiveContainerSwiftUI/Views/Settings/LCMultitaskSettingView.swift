@@ -11,13 +11,12 @@ struct LCMultitaskSettingView: View {
     @AppStorage("LCMultitaskMode", store: LCUtils.appGroupUserDefault) var multitaskMode: MultitaskMode = .virtualWindow
     @AppStorage("LCLaunchInMultitaskMode") var launchInMultitaskMode = false
     @AppStorage("LCLaunchMultitaskMaximized") var launchMultitaskMaximized = false
-    @AppStorage("LCMultitaskBottomWindowBar", store: LCUtils.appGroupUserDefault) var bottomWindowBar = false
+    @AppStorage("LCMultitaskHideWindowBar", store: LCUtils.appGroupUserDefault) var bottomWindowBar = false
     @AppStorage("LCAutoEndPiP", store: LCUtils.appGroupUserDefault) var autoEndPiP = false
     @AppStorage("LCSkipTerminatedScreen", store: LCUtils.appGroupUserDefault) var skipTerminatedScreen = false
     @AppStorage("LCRestartTerminatedApp", store: LCUtils.appGroupUserDefault) var restartTerminatedApp = false
     @AppStorage("LCMaxOneAppOnStage", store: LCUtils.appGroupUserDefault) var onlyOneAppOnStage = false
     @AppStorage("LCDockWidth", store: LCUtils.appGroupUserDefault) var dockWidth: Double = 80
-    @AppStorage("LCHideCollapsedDock", store: LCUtils.appGroupUserDefault) var hideCollapsedDock: Bool = false
     @AppStorage("LCRedirectURLToHost", store: LCUtils.appGroupUserDefault) var redirectURLToHost = false
     
     var body: some View {
@@ -56,7 +55,7 @@ struct LCMultitaskSettingView: View {
                         }
                     }
                     Toggle(isOn: $bottomWindowBar) {
-                        Text("lc.settings.bottomWindowBar".loc)
+                        Text("lc.settings.hideWindowBar".loc)
                     }
                     Toggle(isOn: $redirectURLToHost) {
                         Text("lc.settings.redirectURLToHost".loc)
@@ -78,12 +77,10 @@ struct LCMultitaskSettingView: View {
                     Slider(value: $dockWidth, in: 20...120) {
                         Text("lc.settings.dockWidth".loc)
                     }
-                    .tint(.accentColor)
+.tint(.accentColor)
                 }
-                .padding(.vertical, 4)
-                Toggle(isOn: $hideCollapsedDock) {
-                    Text("lc.settings.hideCollapsedDock".loc)
-                }
+            }
+        }
             }
         }
         .navigationTitle("lc.appBanner.multitask".loc)
