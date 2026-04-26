@@ -387,11 +387,7 @@ class AppInfoProvider {
     }
 
     private func calculateTargetY(for currentFrame: CGRect, dockHeight: CGFloat, screenHeight: CGFloat) -> CGFloat {
-        let safeAreaMinY = self.safeAreaInsets.top + Constants.dockVerticalMargin
-        let safeAreaMaxY = screenHeight - self.safeAreaInsets.bottom - dockHeight - Constants.dockVerticalMargin
-        
-        let safeAreaCenterY = safeAreaMinY + (safeAreaMaxY - safeAreaMinY) / 2
-        return safeAreaCenterY - dockHeight / 2
+        return screenHeight * 0.5 - dockHeight / 2
     }
 
     private func applyNewFrame(_ newFrame: CGRect, for hostingController: UIHostingController<AnyView>, animated: Bool) {
