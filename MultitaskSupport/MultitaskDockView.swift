@@ -718,6 +718,8 @@ public struct MultitaskDockSwiftView: View {
                         
                         MinimizeAllButtonView()
                             .onTapGesture {
+                                let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
+                                impactFeedback.impactOccurred()
                                 dockManager.minimizeAllWindows()
                             }
                     }
@@ -847,6 +849,8 @@ struct AppIconView: View {
         .simultaneousGesture(
             LongPressGesture(minimumDuration: 0.5)
                 .onEnded { _ in
+                    let impactFeedback = UIImpactFeedbackGenerator(style: .heavy)
+                    impactFeedback.impactOccurred()
                     dockManager.removeRunningApp(app.appUUID)
                 }
         )
