@@ -504,17 +504,19 @@ void UIKitFixesInit(void) {
     
     BOOL bottomWindowBar = [NSUserDefaults.lcSharedDefaults boolForKey:@"LCMultitaskBottomWindowBar"];
     BOOL hideWindowBar = MultitaskDockManager.shared.isCollapsed && _isMaximized;
-    CGFloat navBarHeight = hideWindowBar ? 0 : 44;
-    self.navigationBar.hidden = hideWindowBar;
     
     [NSLayoutConstraint deactivateConstraints:self.activatedVerticalConstraints];
     if(bottomWindowBar) {
+        // 신호등 영역 완전히 숨기고 전체 화면 채움
+        self.navigationBar.hidden = YES;
         self.activatedVerticalConstraints = @[
             [self.appSceneVC.view.topAnchor constraintEqualToAnchor:self.view.topAnchor],
-            [self.appSceneVC.view.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor constant:-navBarHeight],
-            [self.navigationBar.heightAnchor constraintEqualToConstant:navBarHeight]
+            [self.appSceneVC.view.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor]
         ];
     } else {
+        // 기존: 상단에 신호등
+        self.navigationBar.hidden = hideWindowBar;
+        CGFloat navBarHeight = hideWindowBar ? 0 : 44;
         self.activatedVerticalConstraints = @[
             [self.appSceneVC.view.topAnchor constraintEqualToAnchor:self.view.topAnchor constant:navBarHeight],
             [self.appSceneVC.view.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
