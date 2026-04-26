@@ -17637,85 +17637,85 @@
         }
       }
     },
-    "lc.settings.bottomWindowBar" : {
+    "lc.settings.hideWindowBar" : {
       "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "شريط النافذة السفلي"
+            "value" : "إخفاء شريط النافذة"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Untere Fensterleiste"
+            "value" : "Fensterleiste ausblenden"
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Bottom Window Bar"
+            "value" : "Hide Window Bar"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Barre de fenêtre du bas"
+            "value" : "Masquer la barre de fenêtre"
           }
         },
         "it" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Barra Finestra Inferiore"
+            "value" : "Nascondi barra finestra"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "下部にウィンドウバーを配置"
+            "value" : "ウィンドウバーを非表示"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "신호등 하단으로 이동"
+            "value" : "신호등 숨김"
           }
         },
         "pl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dolny pasek okna"
+            "value" : "Ukryj pasek okna"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Barra de Janela Inferior"
+            "value" : "Ocultar barra de janela"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Полоса окна снизу"
+            "value" : "Скрыть панель окна"
           }
         },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Alt Pencere Çubuğu"
+            "value" : "Pencere Çubuğunu Gizle"
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Thanh Cửa sổ Dưới cùng"
+            "value" : "Ẩn Thanh Cửa sổ"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "底部窗口栏"
+            "value" : "隐藏窗口栏"
           }
         }
       }
