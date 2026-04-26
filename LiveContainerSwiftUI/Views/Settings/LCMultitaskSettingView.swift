@@ -77,10 +77,8 @@ struct LCMultitaskSettingView: View {
                     Slider(value: $dockWidth, in: 20...120) {
                         Text("lc.settings.dockWidth".loc)
                     }
-.tint(.accentColor)
+                    .tint(.accentColor)
                 }
-            }
-        }
             }
         }
         .navigationTitle("lc.appBanner.multitask".loc)
