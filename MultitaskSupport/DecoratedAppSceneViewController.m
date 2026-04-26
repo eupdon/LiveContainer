@@ -105,7 +105,7 @@ void UIKitFixesInit(void) {
     closeButton.tintColor = [UIColor systemRedColor];
     
     NSArray *barButtonItems = @[closeButton, self.maximizeButton, minimizeButton];
-    if([NSUserDefaults.lcSharedDefaults boolForKey:@"LCMultitaskBottomWindowBar"]) {
+    if([NSUserDefaults.lcSharedDefaults boolForKey:@"LCMultitaskHideWindowBar"]) {
         // resize handle overlaps the close button, so put the buttons on the left
         self.navigationItem.leftBarButtonItems = barButtonItems;
     } else {
@@ -158,7 +158,7 @@ void UIKitFixesInit(void) {
     CGRect contentFrame = CGRectMake(0, 0, self.view.frame.size.width, self.view.frame.size.height - navBarHeight);
     UIView *fixedPositionContentView = [[UIView alloc] initWithFrame:contentFrame];
     self.contentView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    if([NSUserDefaults.lcSharedDefaults boolForKey:@"LCMultitaskBottomWindowBar"]) {
+    if([NSUserDefaults.lcSharedDefaults boolForKey:@"LCMultitaskHideWindowBar"]) {
         [self.view insertArrangedSubview:fixedPositionContentView atIndex:0];
     } else {
         [self.view addArrangedSubview:fixedPositionContentView];
@@ -200,7 +200,7 @@ void UIKitFixesInit(void) {
     
     NSUserDefaults *defaults = NSUserDefaults.lcSharedDefaults;
 
-    [defaults addObserver:self forKeyPath:@"LCMultitaskBottomWindowBar" options:NSKeyValueObservingOptionNew context:NULL];
+    [defaults addObserver:self forKeyPath:@"LCMultitaskHideWindowBar" options:NSKeyValueObservingOptionNew context:NULL];
     [self updateOriginalFrame];
 }
 
@@ -502,7 +502,7 @@ void UIKitFixesInit(void) {
         };
     }
     
-    BOOL bottomWindowBar = [NSUserDefaults.lcSharedDefaults boolForKey:@"LCMultitaskBottomWindowBar"];
+    BOOL bottomWindowBar = [NSUserDefaults.lcSharedDefaults boolForKey:@"LCMultitaskHideWindowBar"];
     BOOL hideWindowBar = MultitaskDockManager.shared.isCollapsed && _isMaximized;
     
     [NSLayoutConstraint deactivateConstraints:self.activatedVerticalConstraints];
@@ -527,7 +527,7 @@ void UIKitFixesInit(void) {
 }
 
 - (UIEdgeInsets)updateMaximizedSafeAreaWithSettings:(UIMutableApplicationSceneSettings *)settings {
-    BOOL bottomWindowBar = [NSUserDefaults.lcSharedDefaults boolForKey:@"LCMultitaskBottomWindowBar"];
+    BOOL bottomWindowBar = [NSUserDefaults.lcSharedDefaults boolForKey:@"LCMultitaskHideWindowBar"];
     UIEdgeInsets safeAreaInsets = self.view.window.safeAreaInsets;
     if(self.navigationBar.hidden) {
         settings.peripheryInsets = safeAreaInsets;
