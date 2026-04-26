@@ -838,6 +838,12 @@ struct AppIconView: View {
                 let _ = dockManager.bringMultitaskViewToFront(uuid: app.appUUID, from: location)
             }
         )
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: 0.5)
+                .onEnded { _ in
+                    dockManager.removeRunningApp(app.appUUID)
+                }
+        )
         .contentShape(Rectangle())
     }
     
