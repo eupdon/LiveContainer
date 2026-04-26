@@ -414,6 +414,12 @@ class AppInfoProvider {
     @objc public func removeRunningApp(_ appUUID: String) {
         guard isDockEnabled() else { return }
         
+        if let appModel = apps.first(where: { $0.appUUID == appUUID }), let appView = appModel.view {
+            if let decoratedVC = appView._viewDelegate() as? DecoratedAppSceneViewController {
+                decoratedVC.appSceneVC.terminate()
+            }
+        }
+        
         DispatchQueue.main.async {
             self.apps.removeAll { $0.appUUID == appUUID }
             
