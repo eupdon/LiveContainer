@@ -23766,6 +23766,12 @@
             "value" : "Redirect URL Schemes to Host LiveContainer"
           }
         },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "앱 간 URL 전달"
+          }
+        },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
@@ -24084,6 +24090,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Redémarrer l'application automatiquement après l'arrêt"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "종료 후 앱 자동 재시작"
           }
         },
         "ru" : {
@@ -24564,6 +24576,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Ignorer l'écran terminé"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "종료된 앱 화면 건너뛰기"
           }
         },
         "ru" : {
