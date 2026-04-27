@@ -416,7 +416,7 @@ class AppInfoProvider {
         
         if let appModel = apps.first(where: { $0.appUUID == appUUID }), let appView = appModel.view {
             if let decoratedVC = appView._viewDelegate() as? DecoratedAppSceneViewController {
-                decoratedVC.closeWindow()
+                decoratedVC.perform(NSSelectorFromString("closeWindow"))
             }
         }
         
