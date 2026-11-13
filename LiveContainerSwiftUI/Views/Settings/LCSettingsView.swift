@@ -210,7 +210,7 @@ struct LCSettingsView: View {
                 } header: {
                     Text("lc.settings.appListStyle".loc)
                 }
-
+                
                 Section{
                     Toggle(isOn: $dynamicColors) {
                         Text("lc.settings.dynamicColors".loc)
