@@ -85,9 +85,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @AppStorage("LCMultitaskMode", store: LCUtils.appGroupUserDefault) var multitaskMode: MultitaskMode = .virtualWindow
     @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) private var darkModeIcon = false
     @AppStorage("lcAppListStyle", store: LCUtils.appGroupUserDefault) private var appListStyle: LCAppListStyle = .grid
-    
+
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    
+
     @State private var appPendingRemoval: LCAppModel?
     @State private var uninstallAlertShow = false
     
@@ -125,23 +125,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         }
     }
-    
-    init(appDataFolderNames: Binding<[String]>, tweakFolderNames: Binding<[String]>, searchContext: SearchContext) {
-        _installOptions = State(initialValue: [])
-        _appDataFolderNames = appDataFolderNames
-        _tweakFolderNames = tweakFolderNames
-        self.searchContext = searchContext
-    }
-    
+
     private var showEmptyState: Bool {
         return filteredApps.isEmpty && sharedModel.hiddenApps.isEmpty && searchContext.debouncedQuery.isEmpty
     }
-    
+
     private var gridColumns: [GridItem] {
         let columnCount = horizontalSizeClass == .regular ? 6 : 4
         return Array(repeating: GridItem(.flexible(), spacing: 12, alignment: .top), count: columnCount)
     }
-    
+
     private var emptyStateView: some View {
         VStack(spacing: 12) {
             Image(systemName: "square.grid.2x2")
@@ -173,7 +166,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         .padding(.vertical, 48)
         .frame(maxWidth: .infinity)
     }
-    
+
     private var hiddenAppsHeader: some View {
         HStack {
             Text("lc.appList.hiddenApps".loc)
@@ -183,7 +176,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         .padding(.horizontal, 16)
         .padding(.top, appListStyle == .grid ? 20 : 0)
     }
-    
+
     @ViewBuilder
     private func appsCollection(apps: [LCAppModel], isHiddenSection: Bool) -> some View {
         if appListStyle == .grid {
@@ -201,7 +194,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             .padding(.top, 12)
             .padding(.bottom, 4)
         } else {
-            LazyVStack {
+            LazyVStack(spacing: 10) {
                 ForEach(apps, id: \.self) { app in
                     if isHiddenSection && !sharedModel.isHiddenAppUnlocked {
                         LCAppSkeletonBanner()
@@ -214,7 +207,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             .padding()
         }
     }
-    
+
     private func gridItem(for app: LCAppModel) -> some View {
         return LCAppGridItem(
             model: app,
@@ -258,6 +251,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         )
         return LCAppMenuBuilder.items(for: app, handlers: handlers)
+    }
+
+    init(appDataFolderNames: Binding<[String]>, tweakFolderNames: Binding<[String]>, searchContext: SearchContext) {
+        _installOptions = State(initialValue: [])
+        _appDataFolderNames = appDataFolderNames
+        _tweakFolderNames = tweakFolderNames
+        self.searchContext = searchContext
     }
     
     var body: some View {
@@ -373,6 +373,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                             helpPresent = true
                         }
                     }
+                    
+
                 }
                 
                 ToolbarItem(placement: .topBarTrailing) {
@@ -438,7 +440,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 Text("lc.common.cancel".loc)
             }
         } message: { app in
-            Text("lc.appBanner.confirmUninstallMsg %@".localizeWithFormat(app.appInfo.displayName() ?? ""))
+            Text("lc.appBanner.confirmUninstallMsg %@".localizeWithFormat(app.displayName))
         }
         .betterFileImporter(isPresented: $choosingIPA, types: [.ipa, .tipa], multiple: false, callback: { fileUrls in
             Task { await startInstallApp(fileUrls[0]) }
@@ -1149,7 +1151,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             removeApp(app: app)
 
             if removeData {
-                try LCAppMenuActions.removeContainers(containers, appDataFolderNames: &appDataFolderNames)
+                try LCAppMenuActions.removeContainers(containers)
+                let removed = Set(containers.map(\.folderName))
+                appDataFolderNames.removeAll { removed.contains($0) }
             }
         } catch {
             errorInfo = error.localizedDescription
@@ -1204,7 +1208,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         return controller
     }
-    
+
     func removeApp(app: LCAppModel) {
         DispatchQueue.main.async {
             sharedModel.apps.removeAll { now in
