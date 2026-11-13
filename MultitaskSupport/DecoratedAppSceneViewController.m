@@ -15,6 +15,8 @@
 @property(nonatomic) CGRect originalFrame;
 @property(nonatomic) UIBarButtonItem *maximizeButton;
 @property(nonatomic) bool isAppTerminationRequested;
+// When "launch maximized" is enabled the window is locked to fullscreen with no title bar
+@property(nonatomic) BOOL immersiveMode;
 @end
 
 @implementation DecoratedAppSceneViewController
@@ -27,6 +29,7 @@
     _dataUUID = dataUUID;
     _scaleRatio = 1.0;
     _isMaximized = [NSUserDefaults.lcUserDefaults boolForKey:@"LCLaunchMultitaskMaximized"];
+    _immersiveMode = _isMaximized;
     _appSceneVC = [[AppSceneViewController alloc] initWithBundleId:bundleId dataUUID:dataUUID delegate:self];
     self.title = windowName;
     [self setupDecoratedView];
@@ -116,10 +119,16 @@
     navigationBar.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     UINavigationItem *navigationItem = [[UINavigationItem alloc] initWithTitle:self.title];
     navigationBar.items = @[navigationItem];
+
+    // Immersive mode: no title bar, the window is pinned fullscreen
+    if(_immersiveMode) {
+        navigationBar.hidden = YES;
+        navigationBar.alpha = 0;
+    }
     
     self.view.axis = UILayoutConstraintAxisVertical;
     self.view.backgroundColor = UIColor.systemBackgroundColor;
-    self.view.layer.cornerRadius = 10;
+    self.view.layer.cornerRadius = _immersiveMode ? 0 : 10;
     self.view.layer.masksToBounds = YES;
 
     self.navigationBar = navigationBar;
@@ -277,6 +286,9 @@
 }
 
 - (void)maximizeWindow {
+    // Immersive windows cannot leave fullscreen
+    if(_immersiveMode) return;
+    
     void (^updateSettingsBlock)(UIMutableApplicationSceneSettings *settings);
     
     [self.view layoutIfNeeded];
@@ -491,7 +503,7 @@
     [self.view layoutIfNeeded];
     [UIView animateWithDuration:0.3 animations:^{
         BOOL bottomWindowBar = [NSUserDefaults.lcSharedDefaults boolForKey:@"LCMultitaskBottomWindowBar"];
-        BOOL hideWindowBar = MultitaskDockManager.shared.isCollapsed && self.isMaximized;
+        BOOL hideWindowBar = self.immersiveMode || (MultitaskDockManager.shared.isCollapsed && self.isMaximized);
         CGFloat navBarHeight = hideWindowBar ? 0 : 44;
         self.navigationBar.alpha = hideWindowBar ? 0 : 1;
         self.navigationBar.hidden = hideWindowBar;
