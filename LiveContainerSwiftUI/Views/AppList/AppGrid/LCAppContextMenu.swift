@@ -2,6 +2,9 @@
 //  LCAppContextMenu.swift
 //  LiveContainerSwiftUI
 //
+//  Shared app context menu model, builder and actions used by both
+//  the home screen style grid and the list style banner.
+//
 
 import Foundation
 import UIKit
@@ -17,6 +20,7 @@ struct LCAppMenuItem: Identifiable {
     let systemImage: String
     var role: Role = .normal
     var isChecked: Bool = false
+    // UIKit renders this item as an inline UIMenu (used for the container picker).
     var isInlineMenu: Bool = false
     var children: [LCAppMenuItem] = []
     var action: (() -> Void)? = nil
@@ -42,6 +46,8 @@ enum LCAppMenuBuilder {
                 LCAppMenuItem(
                     id: "container-\(container.folderName)",
                     title: container.name,
+                    // UIKit draws the checkmark from the item state; SwiftUI derives it
+                    // from isChecked so both styles show a single checkmark.
                     systemImage: "",
                     isChecked: container == model.uiSelectedContainer,
                     action: { handlers.selectContainer(container) }
@@ -66,11 +72,12 @@ enum LCAppMenuBuilder {
         }
 
         if #available(iOS 16.0, *) {
+            let shouldLaunchInMultitaskMode = model.shouldLaunchInMultitaskMode
             items.append(action(
                 id: "run",
-                title: "lc.appBanner.multitask".loc,
-                systemImage: "macwindow.badge.plus",
-                handler: { handlers.run(true) }
+                title: shouldLaunchInMultitaskMode ? "lc.appBanner.run".loc : "lc.appBanner.multitask".loc,
+                systemImage: shouldLaunchInMultitaskMode ? "play.fill" : "macwindow.badge.plus",
+                handler: { handlers.run(!shouldLaunchInMultitaskMode) }
             ))
         }
 
@@ -147,12 +154,11 @@ enum LCAppMenuActions {
         try FileManager.default.removeItem(atPath: bundlePath)
     }
 
-    static func removeContainers(_ containers: [LCContainer], appDataFolderNames: inout [String]) throws {
+    static func removeContainers(_ containers: [LCContainer]) throws {
         for container in containers {
             let dataUUID = container.folderName
             try FileManager.default.removeItem(at: LCPath.dataPath.appendingPathComponent(dataUUID))
             LCUtils.removeAppKeychain(dataUUID: dataUUID)
-            appDataFolderNames.removeAll { $0 == dataUUID }
         }
     }
 
@@ -166,7 +172,7 @@ enum LCAppMenuActions {
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
-        let rawDisplayName = model.appInfo.displayName() ?? model.appInfo.relativeBundlePath ?? "App"
+        let rawDisplayName = model.appInfo.displayName() ?? model.displayName
         let displayName = rawDisplayName.replacingOccurrences(of: "/", with: "_")
         let fileURL = directory.appendingPathComponent("\(displayName) Icon.png")
         try imageData.write(to: fileURL, options: .atomic)
