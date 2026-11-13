@@ -88,12 +88,14 @@ struct LCAppGridItem: View {
                     if model.uiIsShared {
                         badge(systemImage: "arrowshape.turn.up.left.fill", background: sharedBadgeColor, size: 14)
                     }
-                    if model.uiIsJITNeeded && !model.uiIs32bit {
+                    if model.uiIsJITNeeded {
                         badge(systemImage: "bolt.fill", background: jitBadgeColor, size: 14)
                     }
+#if is32BitSupported
                     if model.uiIs32bit {
                         badge(text: "32", background: bit32BadgeColor, size: 14)
                     }
+#endif
                 }
                 .offset(x: 4, y: 4)
             }
@@ -145,6 +147,7 @@ struct LCAppGridItem: View {
             .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 1))
     }
 
+#if is32BitSupported
     @ViewBuilder
     private func badge(text: String, background: Color, size: CGFloat) -> some View {
         Text(text)
@@ -155,6 +158,7 @@ struct LCAppGridItem: View {
             .clipShape(Circle())
             .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 1))
     }
+#endif
 
     private var sharedBadgeColor: Color {
         return Color(uiColor: UIColor(named: "BadgeColor") ?? .systemOrange)
@@ -164,9 +168,11 @@ struct LCAppGridItem: View {
         return Color(uiColor: UIColor(named: "JITBadgeColor") ?? .systemPurple)
     }
 
+#if is32BitSupported
     private var bit32BadgeColor: Color {
         return Color(uiColor: UIColor(named: "32BitBadgeColor") ?? .systemBlue)
     }
+#endif
 }
 
 struct LCAppGridButtonStyle: ButtonStyle {
