@@ -9,6 +9,7 @@ import Foundation
 import SwiftUI
 import UIKit
 import Combine
+import ObjectiveC
 
 // MARK: - App Info Provider
 class AppInfoProvider {
@@ -150,6 +151,14 @@ class AppInfoProvider {
     private lazy var homeBarGestureHandler = HomeBarGestureHandler(manager: self)
     fileprivate var isHomeBarVisible = false
     @Published internal var isHomeBarPressed: Bool = false
+
+    // Fallback touch tracking driven by the window event stream. A fullscreen
+    // guest scene can consume touches before they ever reach the home bar view,
+    // so the bar gestures are also recognised directly from `UIWindow.sendEvent`.
+    private var homeBarTrackedTouch: UITouch?
+    private var homeBarTrackStart: CGPoint = .zero
+    private var homeBarDidTriggerDock = false
+    private var homeBarLongPressWorkItem: DispatchWorkItem?
 
     public struct Constants {
         // MARK: - Layout & Sizing
@@ -321,6 +330,7 @@ class AppInfoProvider {
         keyWindow!.rootViewController!.view.subviews.first!.addSubview(self.windowHostingView)
         setupDockView()
         setupHomeBarView()
+        HomeBarEventHook.install()
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(userDefaultsDidChange),
@@ -407,7 +417,10 @@ class AppInfoProvider {
         window.isOpaque = false
         window.rootViewController = MultitaskOverlayViewController()
         window.rootViewController?.view.backgroundColor = .clear
-        window.isHidden = true
+        // Keep the overlay on screen at all times; `hitTest` passes everything
+        // except the dock through to the windows below, so hiding it only added
+        // race conditions when the bar needed to reappear.
+        window.isHidden = false
         overlayWindow = window
 
         // Transparent target that keeps home bar touches inside the overlay window.
@@ -440,10 +453,13 @@ class AppInfoProvider {
 
     private func refreshOverlayWindowVisibility() {
         guard let overlayWindow else { return }
-        let shouldShow = isHomeBarVisible || isVisible || dockDismissView != nil
-        if overlayWindow.isHidden == shouldShow {
-            overlayWindow.isHidden = !shouldShow
+        // The overlay is always on screen. Its `hitTest` lets every touch that
+        // is not part of the home bar / dock fall through to the windows below,
+        // so there is nothing left to hide.
+        if overlayWindow.isHidden {
+            overlayWindow.isHidden = false
         }
+        updateOverlayWindowFrame()
     }
 
     /// The home bar touch area in the host window's coordinate space.
@@ -461,6 +477,86 @@ class AppInfoProvider {
         if isHomeBarPressed != pressed {
             isHomeBarPressed = pressed
         }
+    }
+
+    // MARK: - Event stream touch tracking (fullscreen fallback)
+
+    /// Recognises the home bar gestures from the window event stream. This does
+    /// not depend on hit-testing, so it keeps working when a fullscreen guest
+    /// scene takes the touch before the bar's own recognizers see it.
+    internal func handleHomeBarEvent(_ event: UIEvent) {
+        guard event.type == .touches,
+              let touches = event.allTouches, !touches.isEmpty,
+              let host = hostWindow else { return }
+
+        guard isHomeBarVisible, !isVisible else {
+            cancelHomeBarTracking()
+            return
+        }
+
+        let barRect = homeBarTouchFrame
+        for touch in touches {
+            let location = touch.location(in: host)
+            switch touch.phase {
+            case .began:
+                if homeBarTrackedTouch == nil, barRect.contains(location) {
+                    homeBarTrackedTouch = touch
+                    homeBarTrackStart = location
+                    homeBarDidTriggerDock = false
+                    setHomeBarPressed(true)
+                    scheduleHomeBarLongPress()
+                }
+            case .moved, .stationary:
+                guard touch === homeBarTrackedTouch else { continue }
+                // A long leftward swipe opens the dock immediately
+                if homeBarTrackStart.x - location.x >= Constants.homeSwipeDockDistance {
+                    triggerHomeBarDock()
+                }
+            case .ended, .cancelled:
+                guard touch === homeBarTrackedTouch else { continue }
+                homeBarTrackedTouch = nil
+                cancelHomeBarLongPress()
+                setHomeBarPressed(false)
+                let didOpenDock = homeBarDidTriggerDock
+                homeBarDidTriggerDock = false
+                // A quick, short leftward swipe goes home
+                if !didOpenDock && homeBarTrackStart.x - location.x >= Constants.homeSwipeHomeDistance {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    goHome()
+                }
+            default:
+                break
+            }
+        }
+    }
+
+    private func scheduleHomeBarLongPress() {
+        cancelHomeBarLongPress()
+        let item = DispatchWorkItem { [weak self] in
+            self?.triggerHomeBarDock()
+        }
+        homeBarLongPressWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Constants.homeLongPressDelay, execute: item)
+    }
+
+    private func cancelHomeBarLongPress() {
+        homeBarLongPressWorkItem?.cancel()
+        homeBarLongPressWorkItem = nil
+    }
+
+    private func cancelHomeBarTracking() {
+        homeBarTrackedTouch = nil
+        homeBarDidTriggerDock = false
+        cancelHomeBarLongPress()
+        setHomeBarPressed(false)
+    }
+
+    private func triggerHomeBarDock() {
+        guard !homeBarDidTriggerDock else { return }
+        homeBarDidTriggerDock = true
+        cancelHomeBarLongPress()
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        showDock()
     }
 
     private func setupHomeBarView() {
@@ -502,6 +598,7 @@ class AppInfoProvider {
             self.isHomeBarVisible = true
             self.updateOverlayWindowFrame()
 
+            self.homeBarTouchView?.isUserInteractionEnabled = true
             if let touchView = self.homeBarTouchView, touchView.superview == nil {
                 container.insertSubview(touchView, at: 0)
             }
@@ -534,6 +631,7 @@ class AppInfoProvider {
         DispatchQueue.main.async {
             self.isHomeBarVisible = false
             self.setHomeBarPressed(false)
+            self.homeBarTouchView?.isUserInteractionEnabled = false
             UIView.animate(withDuration: Constants.shortAnimationDuration1) {
                 controller.view.alpha = 0
             } completion: { _ in
@@ -1381,7 +1479,6 @@ final class HomeBarGestureHandler: NSObject, UIGestureRecognizerDelegate {
 
             // A quick, short leftward swipe goes home
             if startLocation.x - location.x >= MultitaskDockManager.Constants.homeSwipeHomeDistance {
-                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                 manager.goHome()
             }
         default:
@@ -1410,8 +1507,37 @@ final class HomeBarGestureHandler: NSObject, UIGestureRecognizerDelegate {
         guard !didTriggerDock, let manager else { return }
         didTriggerDock = true
         cancelLongPress()
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
         manager.showDock()
+    }
+}
+
+// MARK: - Home Bar Event Hook
+
+/// Taps into `-[UIWindow sendEvent:]` so the home bar still sees touches even
+/// when a fullscreen guest scene consumes them before they reach the bar's own
+/// view or gesture recognizers.
+@available(iOS 16.0, *)
+private enum HomeBarEventHook {
+    private static var installed = false
+
+    static func install() {
+        guard !installed else { return }
+        installed = true
+
+        if let original = class_getInstanceMethod(UIWindow.self, #selector(UIWindow.sendEvent(_:))),
+           let replacement = class_getInstanceMethod(UIWindow.self, #selector(UIWindow.lc_homeBarSendEvent(_:))) {
+            method_exchangeImplementations(original, replacement)
+        }
+    }
+}
+
+extension UIWindow {
+    @objc fileprivate func lc_homeBarSendEvent(_ event: UIEvent) {
+        if #available(iOS 16.0, *), event.type == .touches {
+            MultitaskDockManager.shared.handleHomeBarEvent(event)
+        }
+        // After the method exchange this is the original -[UIWindow sendEvent:]
+        lc_homeBarSendEvent(event)
     }
 }
 
