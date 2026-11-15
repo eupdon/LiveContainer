@@ -3,6 +3,7 @@
 #import "UIKitPrivate.h"
 #import "utils.h"
 #import <LocalAuthentication/LocalAuthentication.h>
+#import <math.h>
 #import "Localization.h"
 
 UIInterfaceOrientation LCOrientationLock = UIInterfaceOrientationUnknown;
@@ -17,6 +18,10 @@ static void UIKitGuestHooksInit() {
     swizzle(UIApplication.class, @selector(openURL:options:completionHandler:), @selector(hook_openURL:options:completionHandler:));
     swizzle(UIApplication.class, @selector(canOpenURL:), @selector(hook_canOpenURL:));
     swizzle(UIApplication.class, @selector(setDelegate:), @selector(hook_setDelegate:));
+    // In immersive multitasking the guest scene owns every touch over the app
+    // viewport, so the host process never sees the home bar gesture. Report it
+    // from here instead.
+    swizzle(UIApplication.class, @selector(sendEvent:), @selector(lc_homeBarGuest_sendEvent:));
     swizzle(UIScene.class, @selector(scene:didReceiveActions:fromTransitionContext:), @selector(hook_scene:didReceiveActions:fromTransitionContext:));
     swizzle(UIScene.class, @selector(openURL:options:completionHandler:), @selector(hook_openURL:options:completionHandler:));
     NSInteger LCOrientationLockDirection = [NSUserDefaults.guestAppInfo[@"LCOrientationLock"] integerValue];
@@ -775,4 +780,208 @@ static LCControlAppURLHandling LCHandleControlAppURL(NSURL *url, NSString** modi
         }
     }
 }
+@end
+
+#pragma mark - Multitask home bar bridge
+
+// In immersive multitasking (LCLaunchMultitaskMaximized) the guest scene covers
+// the whole screen and the host process never receives touches over it, so the
+// home bar / dock reveal gesture has to be detected in this process. Only the
+// gesture phases are reported through Darwin notifications: the host resolves
+// what to do with them, exactly like it does for host-received touches.
+
+static NSString* const LCHomeBarNotificationPrefix = @"com.eupdon.livecontainer.homebar.";
+
+static __weak UITouch* lcHomeBarTrackedTouch = nil;
+static CGPoint lcHomeBarStartPoint = {0, 0};
+static CGPoint lcHomeBarLastPoint = {0, 0};
+static BOOL lcHomeBarTracking = NO;
+static BOOL lcHomeBarMoved = NO;
+static BOOL lcHomeBarDockFired = NO;
+static dispatch_block_t lcHomeBarHoldBlock = nil;
+static dispatch_block_t lcHomeBarWatchdogBlock = nil;
+
+// Same thresholds as MultitaskDockManager.Constants on the host side.
+static const CGFloat LCHomeBarHomeDistance = 30.0;
+static const CGFloat LCHomeBarDockDistance = 110.0;
+static const CGFloat LCHomeBarHoldDelay = 0.4;
+static const CGFloat LCHomeBarMovementTolerance = 12.0;
+// Touch area: right screen edge, vertically centered. Matches the host's
+// home bar zone (30 x 150 pt) with a tiny tolerance.
+static const CGFloat LCHomeBarTouchWidth = 32.0;
+static const CGFloat LCHomeBarTouchHeight = 80.0;
+static const NSTimeInterval LCHomeBarWatchdogDelay = 6.0;
+
+static void LCPostHomeBarNotification(NSString* suffix) {
+    NSString* name = [LCHomeBarNotificationPrefix stringByAppendingString:suffix];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         (__bridge CFStringRef)name,
+                                         NULL, NULL, true);
+}
+
+static void LCHomeBarCancelHold(void) {
+    if(lcHomeBarHoldBlock) {
+        dispatch_block_cancel(lcHomeBarHoldBlock);
+        lcHomeBarHoldBlock = nil;
+    }
+}
+
+static void LCHomeBarCancelWatchdog(void) {
+    if(lcHomeBarWatchdogBlock) {
+        dispatch_block_cancel(lcHomeBarWatchdogBlock);
+        lcHomeBarWatchdogBlock = nil;
+    }
+}
+
+static BOOL LCGuestHomeBarEnabled(void) {
+    if(!NSUserDefaults.lcGuestAppId) return NO;
+    // Only the virtual window multitask mode hosts guest scenes; native windows
+    // are hit-testable from the host process.
+    return [NSUserDefaults.lcSharedDefaults integerForKey:@"LCMultitaskMode"] == 0;
+}
+
+// The bridge must only act when this window really covers the screen, otherwise
+// it would steal the gesture from the host in windowed mode.
+static BOOL LCGuestWindowCoversScreen(UIWindow* window) {
+    if(!window) return NO;
+    CGSize screen = UIScreen.mainScreen.bounds.size;
+    CGSize size = window.bounds.size;
+    if(size.width <= 0 || size.height <= 0) return NO;
+    CGFloat screenShort = MIN(screen.width, screen.height);
+    CGFloat screenLong = MAX(screen.width, screen.height);
+    CGFloat windowShort = MIN(size.width, size.height);
+    CGFloat windowLong = MAX(size.width, size.height);
+    return fabs(windowShort - screenShort) <= 2.0 && fabs(windowLong - screenLong) <= 2.0;
+}
+
+static void LCHomeBarScheduleHold(void) {
+    LCHomeBarCancelHold();
+    dispatch_block_t hold = dispatch_block_create(0, ^{
+        if(!lcHomeBarTracking || lcHomeBarMoved || lcHomeBarDockFired) return;
+        lcHomeBarDockFired = YES;
+        LCPostHomeBarNotification(@"hold");
+    });
+    lcHomeBarHoldBlock = hold;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(LCHomeBarHoldDelay * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), hold);
+}
+
+static void LCHomeBarScheduleWatchdog(void) {
+    LCHomeBarCancelWatchdog();
+    dispatch_block_t watchdog = dispatch_block_create(0, ^{
+        if(!lcHomeBarTracking) return;
+        LCHomeBarCancelHold();
+        LCPostHomeBarNotification(@"cancel");
+        lcHomeBarTrackedTouch = nil;
+        lcHomeBarTracking = NO;
+        lcHomeBarMoved = NO;
+        lcHomeBarDockFired = NO;
+    });
+    lcHomeBarWatchdogBlock = watchdog;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(LCHomeBarWatchdogDelay * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), watchdog);
+}
+
+static void LCHomeBarFinishTouch(UITouch* touch, BOOL cancelled) {
+    LCHomeBarCancelHold();
+    LCHomeBarCancelWatchdog();
+
+    // `touch.window` can already be nil by the time the end event arrives, so the
+    // distance is measured against the last location seen while moving.
+    CGFloat dx = lcHomeBarLastPoint.x - lcHomeBarStartPoint.x;
+    if(!cancelled && !lcHomeBarDockFired && dx <= -LCHomeBarHomeDistance) {
+        LCPostHomeBarNotification(@"home");
+    }
+    LCPostHomeBarNotification(cancelled ? @"cancel" : @"end");
+
+    lcHomeBarTrackedTouch = nil;
+    lcHomeBarTracking = NO;
+    lcHomeBarMoved = NO;
+    lcHomeBarDockFired = NO;
+}
+
+static void LCGuestHandleHomeBarEvent(UIEvent* event) {
+    if(event.type != UIEventTypeTouches) return;
+    NSSet<UITouch*>* touches = event.allTouches;
+    if(touches.count == 0) return;
+    if(!LCGuestHomeBarEnabled()) return;
+
+    UITouch* tracked = lcHomeBarTrackedTouch;
+    if(tracked && [touches containsObject:tracked]) {
+        UIWindow* window = tracked.window;
+        if(!window) {
+            LCHomeBarFinishTouch(tracked, YES);
+            return;
+        }
+        CGPoint point = [tracked locationInView:window];
+        lcHomeBarLastPoint = point;
+
+        switch(tracked.phase) {
+            case UITouchPhaseBegan:
+                break;
+            case UITouchPhaseMoved: {
+                CGFloat dx = point.x - lcHomeBarStartPoint.x;
+                CGFloat dy = point.y - lcHomeBarStartPoint.y;
+                if(!lcHomeBarMoved && (fabs(dx) > LCHomeBarMovementTolerance || fabs(dy) > LCHomeBarMovementTolerance)) {
+                    // Clearly a drag, not a hold.
+                    lcHomeBarMoved = YES;
+                    LCHomeBarCancelHold();
+                }
+                if(!lcHomeBarDockFired && dx <= -LCHomeBarDockDistance) {
+                    lcHomeBarDockFired = YES;
+                    LCHomeBarCancelHold();
+                    LCPostHomeBarNotification(@"dock");
+                }
+                break;
+            }
+            case UITouchPhaseEnded:
+                LCHomeBarFinishTouch(tracked, NO);
+                break;
+            case UITouchPhaseCancelled:
+                LCHomeBarFinishTouch(tracked, YES);
+                break;
+            default:
+                break;
+        }
+        return;
+    }
+
+    // A tracked touch that disappeared without an end event would block the bar.
+    if(lcHomeBarTracking) {
+        LCHomeBarFinishTouch(tracked, YES);
+    }
+
+    for(UITouch* touch in touches) {
+        if(touch.phase != UITouchPhaseBegan) continue;
+        UIWindow* window = touch.window;
+        if(!LCGuestWindowCoversScreen(window)) continue;
+
+        CGRect bounds = window.bounds;
+        CGPoint point = [touch locationInView:window];
+        if(point.x < bounds.size.width - LCHomeBarTouchWidth) continue;
+        if(fabs(point.y - bounds.size.height / 2.0) > LCHomeBarTouchHeight) continue;
+
+        lcHomeBarStartPoint = point;
+        lcHomeBarLastPoint = point;
+        lcHomeBarTracking = YES;
+        lcHomeBarMoved = NO;
+        lcHomeBarDockFired = NO;
+        lcHomeBarTrackedTouch = touch;
+        LCPostHomeBarNotification(@"begin");
+        LCHomeBarScheduleHold();
+        LCHomeBarScheduleWatchdog();
+        break;
+    }
+}
+
+@interface UIApplication(LCGuestHomeBar)
+@end
+
+@implementation UIApplication(LCGuestHomeBar)
+
+- (void)lc_homeBarGuest_sendEvent:(UIEvent*)event {
+    [self lc_homeBarGuest_sendEvent:event];
+    LCGuestHandleHomeBarEvent(event);
+}
+
 @end
