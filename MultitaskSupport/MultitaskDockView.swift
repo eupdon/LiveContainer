@@ -140,44 +140,13 @@ class AppInfoProvider {
     internal var hostingController: UIHostingController<AnyView>?
     internal var homeBarController: UIHostingController<AnyView>?
     private var dockDismissView: UIView?
-    private var homeBarTouchView: UIView?
 
-    // The window that hosts the guest apps. It is captured once because the
-    // dedicated overlay window below must never be mistaken for it.
+    // The window that actually hosts the guest apps.
     private var hostWindowStorage: UIWindow?
-    // Transparent window that keeps the home bar / dock above the guest apps.
-    private var overlayWindow: MultitaskOverlayWindow?
-    internal lazy var homeBarGestureHandler = HomeBarGestureHandler(manager: self)
-    fileprivate var isHomeBarVisible = false
+    internal var isHomeBarVisible = false
     @Published internal var isHomeBarPressed: Bool = false
-
-    // MARK: - Touch probes
-    // A fullscreen guest scene is hosted in a separate process. Depending on the
-    // iOS version, touches inside its viewport may never reach this process, which
-    // makes every normal gesture path silently fail. These three flags are shown as
-    // dots on the home bar and tell us how far a touch actually travelled:
-    //   app    = UIApplication received a touch event at all
-    //   bar    = that touch started inside the home bar rectangle
-    //   window = a gesture recognizer on a window / the bar view began
-    @Published internal var probeAppEvent = false
-    @Published internal var probeBarTouch = false
-    @Published internal var probeWindowGesture = false
-
-    // The guest scene is presented above usual window levels, so the overlay has to
-    // sit far above everything to stay reachable.
-    internal static let overlayWindowLevel = UIWindow.Level(rawValue: 1_000_000)
-
-    internal func noteAppEvent() {
-        if !probeAppEvent { probeAppEvent = true }
-    }
-
-    internal func noteBarTouch() {
-        if !probeBarTouch { probeBarTouch = true }
-    }
-
-    internal func noteWindowGesture() {
-        if !probeWindowGesture { probeWindowGesture = true }
-    }
+    private var homeBarHoldWorkItem: DispatchWorkItem?
+    private var homeBarDockTriggered = false
 
     public struct Constants {
         // MARK: - Layout & Sizing
@@ -322,7 +291,7 @@ class AppInfoProvider {
             return storage
         }
         let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene
-        let fallback = scene?.windows.first(where: { $0 !== overlayWindow })
+        let fallback = scene?.windows.first
         hostWindowStorage = fallback
         return fallback
     }
@@ -346,27 +315,11 @@ class AppInfoProvider {
         super.init()
         let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene
         hostWindowStorage = scene?.windows.first
-        keyWindow!.rootViewController!.view.subviews.first!.addSubview(self.windowHostingView)
         setupDockView()
-        setupHomeBarView()
-        // Observe every touch that reaches this process. A fullscreen guest scene
-        // can swallow window hit-testing, but the event still passes through
-        // UIApplication, so this is the last host-side chance to see the touch.
-        HomeBarAppEventMonitor.install()
-        // Guest apps can add or replace windows when they go fullscreen. Keep the
-        // home bar gestures installed on whatever window is actually on screen.
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(hostWindowDidChange),
-            name: UIWindow.didBecomeVisibleNotification,
-            object: nil
-        )
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(hostWindowDidChange),
-            name: UIWindow.didBecomeKeyNotification,
-            object: nil
-        )
+        hostWindow!.rootViewController!.view.subviews.first!.addSubview(self.windowHostingView)
+        // When the guest scene receives the touches itself (immersive fullscreen),
+        // the injected TweakLoader reports the bar gesture from the guest process.
+        HomeBarGuestBridge.install()
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(userDefaultsDidChange),
@@ -388,18 +341,10 @@ class AppInfoProvider {
 
     @objc private func deviceOrientationDidChange() {
         DispatchQueue.main.async {
-            self.updateOverlayWindowFrame()
             if self.isVisible {
                 self.updateDockFrame()
             }
             self.updateHomeBarFrame()
-            self.homeBarGestureHandler.attachToAllWindows()
-        }
-    }
-
-    @objc private func hostWindowDidChange() {
-        DispatchQueue.main.async {
-            self.homeBarGestureHandler.attachToAllWindows()
         }
     }
     
@@ -426,115 +371,49 @@ class AppInfoProvider {
 
     // MARK: - Home Bar
 
-    // MARK: - Overlay Window
-
-    /// Transparent passthrough window that keeps the home bar and dock above the
-    /// guest app windows. Fullscreen guest scenes draw over the whole screen, so a
-    /// plain subview of the main window can end up below them. A dedicated window
-    /// stays on top, while `MultitaskOverlayWindow.hitTest` lets every touch that
-    /// is not on the home bar / dock fall through to the windows below.
-    @discardableResult
-    private func setupOverlayWindow() -> MultitaskOverlayWindow? {
-        if let existing = overlayWindow {
-            let hostScene = hostWindow?.windowScene
-            if let existingScene = existing.windowScene, existingScene === hostScene {
-                return existing
-            }
-            // The host window moved to another scene (or the overlay was detached);
-            // rebuild it there.
-            existing.isHidden = true
-            homeBarController?.view.removeFromSuperview()
-            hostingController?.view.removeFromSuperview()
-            removeDockDismissView()
-            homeBarTouchView?.removeFromSuperview()
-            homeBarTouchView = nil
-            overlayWindow = nil
-        }
-
-        guard let hostWindow, let scene = hostWindow.windowScene else { return nil }
-
-        let window = MultitaskOverlayWindow(windowScene: scene)
-        window.frame = hostWindow.bounds
-        window.windowLevel = MultitaskDockManager.overlayWindowLevel
-        window.backgroundColor = .clear
-        window.isOpaque = false
-        window.rootViewController = MultitaskOverlayViewController()
-        window.rootViewController?.view.backgroundColor = .clear
-        // Keep the overlay on screen at all times; `hitTest` passes everything
-        // except the dock through to the windows below, so hiding it only added
-        // race conditions when the bar needed to reappear.
-        window.isHidden = false
-        overlayWindow = window
-
-        // Transparent target that keeps home bar touches inside the overlay window.
-        let touchView = UIView()
-        touchView.backgroundColor = .clear
-        touchView.isUserInteractionEnabled = true
-        window.rootViewController?.view.addSubview(touchView)
-        homeBarTouchView = touchView
-        window.homeBarTouchView = touchView
-        homeBarGestureHandler.attachToHomeBarView(touchView)
-        return window
-    }
-
-    private func overlayContainerView() -> UIView? {
-        return setupOverlayWindow()?.rootViewController?.view
-    }
-
-    private func updateOverlayWindowFrame() {
-        guard let overlayWindow else { return }
-        guard let hostWindow else { return }
-        if overlayWindow.windowScene !== hostWindow.windowScene {
-            setupOverlayWindow()
-            return
-        }
-        if overlayWindow.frame != hostWindow.bounds {
-            overlayWindow.frame = hostWindow.bounds
-        }
-        // Stay above every window in the scene, including the guest scene's
-        // presentation layer. Only the bar / dock area is intercepted, the rest
-        // is passed through by `hitTest`.
-        var level = MultitaskDockManager.overlayWindowLevel
-        if let scene = overlayWindow.windowScene {
-            for window in scene.windows where window !== overlayWindow {
-                if window.windowLevel.rawValue >= level.rawValue {
-                    level = UIWindow.Level(rawValue: window.windowLevel.rawValue + 1)
-                }
-            }
-        }
-        if overlayWindow.windowLevel != level {
-            overlayWindow.windowLevel = level
+    /// Every window that is pinned to immersive fullscreen.
+    private var immersiveWindowControllers: [DecoratedAppSceneViewController] {
+        apps.compactMap { app in
+            guard let vc = app.view?._viewDelegate() as? DecoratedAppSceneViewController,
+                  vc.immersiveFullscreen else { return nil }
+            return vc
         }
     }
 
-    private func refreshOverlayWindowVisibility() {
-        guard let overlayWindow else { return }
-        // The overlay is always on screen. Its `hitTest` lets every touch that
-        // is not part of the home bar / dock fall through to the windows below,
-        // so there is nothing left to hide.
-        if overlayWindow.isHidden {
-            overlayWindow.isHidden = false
-        }
-        updateOverlayWindowFrame()
+    /// True while at least one app occupies the whole screen in immersive mode.
+    /// In that state the guest process receives every touch over its viewport.
+    internal var hasImmersiveFullscreenApp: Bool {
+        !immersiveWindowControllers.isEmpty
     }
 
-    /// The home bar touch area inside any given window's coordinate space.
-    /// Used both for laying the bar out and for gesture hit filtering, so the
-    /// recognizers keep working on a window other than the captured host one.
-    internal func homeBarZoneRect(in view: UIView) -> CGRect {
-        let bounds = view.bounds
+    /// In immersive fullscreen the guest scene receives every touch over its
+    /// viewport, so a dock drawn on top of it can never be tapped. Freeing the
+    /// dock strip by shrinking the immersive window is what makes the dock usable
+    /// there, and it mirrors the original hidden-dock reveal animation.
+    private func updateImmersiveDockReveal(_ revealed: Bool) {
+        let offset = revealed ? dockWidth : 0
+        for vc in immersiveWindowControllers {
+            vc.setDockRevealOffset(offset, animated: true)
+        }
+    }
+
+    /// The home bar strip on the right screen edge, in the host window's space.
+    internal var homeBarZoneRect: CGRect {
+        guard let hostWindow else { return .zero }
+        let bounds = hostWindow.bounds
         guard bounds.width > 0, bounds.height > 0 else { return .zero }
-        let insets = view.safeAreaInsets
+        var insets = hostWindow.safeAreaInsets
+        // An immersive window covers the physical screen edge, so the bar hugs
+        // that same edge. Otherwise the guest (which has no side safe area in
+        // immersive mode) and the host would disagree about where the bar is.
+        if hasImmersiveFullscreenApp {
+            insets.left = 0
+            insets.right = 0
+        }
         return CGRect(x: bounds.width - Constants.homeBarTouchWidth - insets.right,
                       y: (bounds.height - Constants.homeBarTouchHeight) / 2,
                       width: Constants.homeBarTouchWidth,
                       height: Constants.homeBarTouchHeight)
-    }
-
-    /// The home bar touch area in the host window's coordinate space.
-    internal var homeBarTouchFrame: CGRect {
-        guard let hostWindow else { return .zero }
-        return homeBarZoneRect(in: hostWindow)
     }
 
     internal func setHomeBarPressed(_ pressed: Bool) {
@@ -543,70 +422,54 @@ class AppInfoProvider {
         }
     }
 
+    /// The bar only draws itself. Its gestures are ordinary recognizers on the
+    /// hosting view, exactly like the dock panel's own gestures.
     private func setupHomeBarView() {
-        DispatchQueue.main.async {
-            let homeBarView = AnyView(HomeBarSwiftView()
-                .environmentObject(self))
-            let controller = UIHostingController(rootView: homeBarView)
-            controller.view.backgroundColor = .clear
-            controller.view.alpha = 0
-            // The visual bar never receives touches itself. The overlay window owns
-            // gesture recognizers for the bar area, so a fullscreen guest scene can
-            // no longer swallow the touches.
-            controller.view.isUserInteractionEnabled = false
-            self.homeBarController = controller
-            self.updateHomeBarFrame()
+        let homeBarView = AnyView(HomeBarSwiftView()
+            .environmentObject(self))
+        let controller = UIHostingController(rootView: homeBarView)
+        controller.view.backgroundColor = .clear
+        controller.view.alpha = 0
+        controller.view.isUserInteractionEnabled = false
+
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handleHomeBarPan(_:)))
+        pan.maximumNumberOfTouches = 1
+        let hold = UILongPressGestureRecognizer(target: self, action: #selector(handleHomeBarHold(_:)))
+        hold.minimumPressDuration = 0
+        hold.allowableMovement = .greatestFiniteMagnitude
+        for recognizer in [pan, hold] as [UIGestureRecognizer] {
+            recognizer.cancelsTouchesInView = false
+            recognizer.delaysTouchesBegan = false
+            recognizer.delaysTouchesEnded = false
+            controller.view.addGestureRecognizer(recognizer)
         }
+        homeBarController = controller
     }
 
-    private func updateHomeBarFrame(animated: Bool = false) {
-        guard let controller = homeBarController, hostWindow != nil else { return }
-        updateOverlayWindowFrame()
-        let frame = homeBarTouchFrame
-        homeBarTouchView?.frame = frame
-        guard controller.view.frame != frame else { return }
-        if animated {
-            UIView.animate(withDuration: Constants.shortAnimationDuration1) {
-                controller.view.frame = frame
-            }
-        } else {
-            controller.view.frame = frame
-        }
+    private func updateHomeBarFrame() {
+        guard let controller = homeBarController else { return }
+        let frame = homeBarZoneRect
+        guard frame != .zero, controller.view.frame != frame else { return }
+        controller.view.frame = frame
     }
 
     @objc public func showHomeBar() {
         guard isDockEnabled(), !apps.isEmpty else { return }
-        guard let controller = homeBarController, let container = overlayContainerView() else { return }
-
         DispatchQueue.main.async {
+            guard let window = self.keyWindow else { return }
+            if self.homeBarController == nil {
+                self.setupHomeBarView()
+            }
+            guard let controller = self.homeBarController else { return }
+            if self.isHomeBarVisible && controller.view.superview != nil { return }
             self.isHomeBarVisible = true
-            self.updateOverlayWindowFrame()
-            // Reinstall the reveal gestures on every window. This is the same
-            // window-level mechanism the original hidden-dock gesture used, and
-            // it is the path that keeps working while an app is fullscreen.
-            self.homeBarGestureHandler.attachToAllWindows()
-
-            self.homeBarTouchView?.isUserInteractionEnabled = true
-            if let touchView = self.homeBarTouchView, touchView.superview == nil {
-                container.insertSubview(touchView, at: 0)
-            }
-            if controller.view.superview !== container {
-                container.addSubview(controller.view)
-            }
-            if let touchView = self.homeBarTouchView, touchView.superview === container {
-                container.insertSubview(controller.view, aboveSubview: touchView)
+            controller.view.isUserInteractionEnabled = true
+            if controller.view.superview == nil {
+                window.addSubview(controller.view)
+            } else {
+                window.bringSubviewToFront(controller.view)
             }
             self.updateHomeBarFrame()
-
-            // while the dock is open, keep the home bar underneath the dimming / dismiss layer
-            if let dismissView = self.dockDismissView, dismissView.superview === container {
-                container.insertSubview(controller.view, belowSubview: dismissView)
-            } else {
-                container.bringSubviewToFront(controller.view)
-            }
-
-            self.refreshOverlayWindowVisibility()
-
             UIView.animate(withDuration: Constants.shortAnimationDuration1) {
                 controller.view.alpha = 1
             }
@@ -614,24 +477,111 @@ class AppInfoProvider {
     }
 
     @objc public func hideHomeBar() {
-        guard let controller = homeBarController else { return }
-
         DispatchQueue.main.async {
+            guard let controller = self.homeBarController else { return }
             self.isHomeBarVisible = false
             self.setHomeBarPressed(false)
-            self.homeBarTouchView?.isUserInteractionEnabled = false
+            self.cancelHomeBarHold()
+            controller.view.isUserInteractionEnabled = false
             UIView.animate(withDuration: Constants.shortAnimationDuration1) {
                 controller.view.alpha = 0
-            } completion: { _ in
-                if self.apps.isEmpty {
-                    controller.view.removeFromSuperview()
-                    self.homeBarTouchView?.removeFromSuperview()
-                } else {
-                    // A new app started while the bar was fading out
-                    self.showHomeBar()
-                }
-                self.refreshOverlayWindowVisibility()
             }
+        }
+    }
+
+    // MARK: - Home Bar Gestures
+
+    @objc private func handleHomeBarPan(_ recognizer: UIPanGestureRecognizer) {
+        let translation = recognizer.translation(in: recognizer.view)
+        switch recognizer.state {
+        case .began:
+            homeBarDockTriggered = false
+            setHomeBarPressed(true)
+            scheduleHomeBarHold()
+        case .changed:
+            if translation.x <= -Constants.homeSwipeDockDistance {
+                triggerDockFromHomeBar()
+            } else if translation.x <= -Constants.homeSwipeHomeDistance {
+                // Clearly a swipe, not a hold.
+                cancelHomeBarHold()
+            }
+        case .ended, .cancelled, .failed:
+            cancelHomeBarHold()
+            setHomeBarPressed(false)
+            let shouldGoHome = !homeBarDockTriggered
+                && !isVisible
+                && translation.x <= -Constants.homeSwipeHomeDistance
+            homeBarDockTriggered = false
+            if shouldGoHome {
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                goHome()
+            }
+        default:
+            break
+        }
+    }
+
+    @objc private func handleHomeBarHold(_ recognizer: UILongPressGestureRecognizer) {
+        switch recognizer.state {
+        case .began:
+            homeBarDockTriggered = false
+            setHomeBarPressed(true)
+            scheduleHomeBarHold()
+        case .ended, .cancelled, .failed:
+            cancelHomeBarHold()
+            setHomeBarPressed(false)
+            homeBarDockTriggered = false
+        default:
+            break
+        }
+    }
+
+    private func scheduleHomeBarHold() {
+        cancelHomeBarHold()
+        let item = DispatchWorkItem { [weak self] in
+            self?.triggerDockFromHomeBar()
+        }
+        homeBarHoldWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Constants.homeLongPressDelay, execute: item)
+    }
+
+    private func cancelHomeBarHold() {
+        homeBarHoldWorkItem?.cancel()
+        homeBarHoldWorkItem = nil
+    }
+
+    private func triggerDockFromHomeBar() {
+        guard !homeBarDockTriggered, !isVisible else { return }
+        homeBarDockTriggered = true
+        cancelHomeBarHold()
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        setHomeBarPressed(false)
+        showDock()
+    }
+
+    // MARK: - Guest Process Signals
+
+    /// Handles a signal posted by the tweak inside the guest app process. Only
+    /// the gesture phase is sent; the guest resolves the distances itself.
+    internal func handleGuestSignal(_ name: String) {
+        let prefix = HomeBarGuestBridge.notificationPrefix
+        guard name.hasPrefix(prefix) else { return }
+        switch String(name.dropFirst(prefix.count)) {
+        case HomeBarGuestBridge.beginSuffix:
+            guard isHomeBarVisible, !isVisible else { return }
+            setHomeBarPressed(true)
+        case HomeBarGuestBridge.holdSuffix, HomeBarGuestBridge.dockSuffix:
+            triggerDockFromHomeBar()
+        case HomeBarGuestBridge.homeSuffix:
+            cancelHomeBarHold()
+            setHomeBarPressed(false)
+            guard !isVisible, !homeBarDockTriggered else { return }
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            goHome()
+        default:
+            cancelHomeBarHold()
+            setHomeBarPressed(false)
+            homeBarDockTriggered = false
         }
     }
 
@@ -681,6 +631,9 @@ class AppInfoProvider {
     @objc public func goHome() {
         minimizeAllWindows()
         DispatchQueue.main.async {
+            // The dock may never have been visible, so restore the immersive
+            // windows explicitly instead of relying on hideDock's completion.
+            self.updateImmersiveDockReveal(false)
             DataManager.shared.model.selectedTab = .apps
             self.hideDock()
         }
@@ -781,7 +734,7 @@ class AppInfoProvider {
     @objc public func addRunningApp(_ appName: String, appUUID: String, view: UIView?) {
         // The window that actually hosts the app is authoritative: it is not
         // necessarily the first window of the scene once other windows exist.
-        if let window = view?.window, window !== overlayWindow,
+        if let window = view?.window,
            window.windowLevel.rawValue <= UIWindow.Level.normal.rawValue {
             hostWindowStorage = window
         }
@@ -801,7 +754,6 @@ class AppInfoProvider {
             } else if self.isVisible {
                 self.updateDockFrame()
             }
-            self.refreshOverlayWindowVisibility()
         }
     }
     
@@ -809,13 +761,16 @@ class AppInfoProvider {
         guard isDockEnabled(), !apps.isEmpty else { return }
         guard !isVisible, let hostingController = hostingController else { return }
         
-        guard let container = overlayContainerView(), let hostWindow = self.hostWindow else { return }
+        guard let hostWindow = self.hostWindow else { return }
         
         DispatchQueue.main.async {
             self.isVisible = true
-            self.updateOverlayWindowFrame()
+            self.hideHomeBar()
+            // Make sure the dock strip is not covered by an immersive guest scene.
+            self.updateImmersiveDockReveal(true)
             
             let screenBounds = hostWindow.bounds
+            let container = hostWindow
             let currentDockWidth = self.dockWidth
             let initialHeight = Constants.initialDockShowHeight
             
@@ -830,10 +785,9 @@ class AppInfoProvider {
                 )
             }
 
-            // Dim / tap-out layer below the dock, above app windows and the home bar
+            // Dim / tap-out layer below the dock, above app windows
             self.insertDockDismissView(in: container)
             container.bringSubviewToFront(hostingController.view)
-            self.refreshOverlayWindowVisibility()
             
             self.updateDockFrame(animated: false) 
             
@@ -878,8 +832,8 @@ class AppInfoProvider {
                 self.isVisible = false
                 hostingController.view.transform = .identity
                 self.removeDockDismissView()
+                self.updateImmersiveDockReveal(false)
                 self.showHomeBar()
-                self.refreshOverlayWindowVisibility()
             }
         }
     }
@@ -1309,18 +1263,9 @@ class IconCacheManager {
 struct HomeBarSwiftView: View {
     @EnvironmentObject var dockManager: MultitaskDockManager
 
-    private var visualWidth: CGFloat {
-        MultitaskDockManager.Constants.homeBarVisualWidth
-    }
-
-    private var visualHeight: CGFloat {
-        MultitaskDockManager.Constants.homeBarVisualHeight
-    }
-
     var body: some View {
         ZStack(alignment: .trailing) {
             Color.clear
-                .contentShape(Rectangle())
 
             Capsule(style: .continuous)
                 .fill(Color.white.opacity(dockManager.isHomeBarPressed ? 0.9 : 0.55))
@@ -1328,395 +1273,13 @@ struct HomeBarSwiftView: View {
                     Capsule(style: .continuous)
                         .stroke(Color.black.opacity(0.25), lineWidth: 0.5)
                 )
-                .frame(width: visualWidth, height: visualHeight)
+                .frame(width: MultitaskDockManager.Constants.homeBarVisualWidth,
+                       height: MultitaskDockManager.Constants.homeBarVisualHeight)
                 .shadow(color: .black.opacity(0.35), radius: 2, x: 0, y: 1)
                 .padding(.trailing, 2)
-                .allowsHitTesting(false)
-
-            // One-build diagnosis dots. Green = app event (A), blue = bar zone
-            // touch (B), orange = window gesture (W). They turn on when the
-            // corresponding stage of the touch pipeline fires at least once.
-            VStack(spacing: 3) {
-                probeDot(dockManager.probeAppEvent, color: .green)
-                probeDot(dockManager.probeBarTouch, color: .blue)
-                probeDot(dockManager.probeWindowGesture, color: .orange)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            .padding(.leading, 2)
-            .allowsHitTesting(false)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .allowsHitTesting(false)
         .animation(.easeInOut(duration: 0.15), value: dockManager.isHomeBarPressed)
-    }
-
-    private func probeDot(_ on: Bool, color: Color) -> some View {
-        Circle()
-            .fill(on ? color : Color.white.opacity(0.18))
-            .frame(width: 5, height: 5)
-            .overlay(
-                Circle().stroke(Color.black.opacity(0.35), lineWidth: 0.5)
-            )
-    }
-}
-
-// MARK: - Overlay Window (home bar / dock passthrough)
-
-/// Transparent window that keeps the home bar and dock above the guest apps.
-/// Anything that is not an interactive subview is passed through to the windows
-/// below, so the hosted app keeps receiving its own touches.
-@available(iOS 16.0, *)
-final class MultitaskOverlayWindow: UIWindow {
-    weak var homeBarTouchView: UIView?
-
-    override var canBecomeKey: Bool { false }
-    override var canBecomeFocused: Bool { false }
-
-    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        let manager = MultitaskDockManager.shared
-        // Grab the home bar explicitly instead of trusting subview order. The bar
-        // must stay reachable even if the hierarchy was rebuilt while an app went
-        // fullscreen.
-        if manager.isHomeBarVisible, !manager.isVisible,
-           let bar = homeBarTouchView, bar.superview != nil,
-           bar.isUserInteractionEnabled, !bar.isHidden, bar.alpha > 0.01,
-           bar.convert(bar.bounds, to: self).contains(point) {
-            return bar
-        }
-        guard let hitView = super.hitTest(point, with: event) else { return nil }
-        // Hitting the window / container itself means the point belongs to an app below.
-        if hitView === self || hitView === rootViewController?.view {
-            return nil
-        }
-        return hitView
-    }
-}
-
-@available(iOS 16.0, *)
-final class MultitaskOverlayViewController: UIViewController {
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        view.backgroundColor = .clear
-        view.isOpaque = false
-    }
-}
-
-/// Owns the home bar gestures. They are attached to the windows themselves,
-/// exactly like the original hidden-dock reveal gesture, because a fullscreen
-/// guest scene can cover any regular subview (and any extra overlay window).
-/// Touches that land on the bar are recognised no matter which window is on top.
-@available(iOS 16.0, *)
-final class HomeBarGestureHandler: NSObject, UIGestureRecognizerDelegate {
-    private weak var manager: MultitaskDockManager?
-    private var recognizers: [UIGestureRecognizer] = []
-
-    // State shared by every recognizer that is tracking the current touch. The
-    // edge pan, the plain pan and the hold recognizer can all recognise the same
-    // gesture, so they must agree on whether the dock was already opened.
-    private var activeRecognizers = Set<ObjectIdentifier>()
-    private var dockTriggered = false
-    private var holdWorkItem: DispatchWorkItem?
-    private var lastHomeTrigger: TimeInterval = 0
-
-    // Raw touch tracking fed by `UIApplication.sendEvent`. This path does not
-    // depend on window hit-testing, so it still sees a touch even when a
-    // fullscreen guest scene would otherwise swallow it.
-    private var rawTouchActive = false
-    private weak var rawTouch: UITouch?
-    private var rawTouchStart: CGPoint?
-    private var rawDockTriggered = false
-    private var rawWatchdog: DispatchWorkItem?
-
-    init(manager: MultitaskDockManager) {
-        self.manager = manager
-        super.init()
-    }
-
-    /// Installs the gestures on every window in every scene. Windows can be
-    /// added or replaced when a guest app goes fullscreen, so this is called
-    /// whenever the home bar appears and whenever a window becomes visible/key.
-    func attachToAllWindows() {
-        recognizers.removeAll { $0.view == nil }
-        let windows = UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .flatMap { $0.windows }
-        for window in windows {
-            attach(to: window, withEdgePan: true)
-        }
-    }
-
-    /// Also attaches the pan/hold recognizers directly to the bar's touch view.
-    /// This is the shortest possible path when the touch is already delivered to
-    /// the overlay window, and guards make double recognition harmless.
-    func attachToHomeBarView(_ view: UIView) {
-        attach(to: view, withEdgePan: false)
-    }
-
-    private func attach(to view: UIView, withEdgePan: Bool) {
-        guard !recognizers.contains(where: { $0.view === view }) else { return }
-
-        // 1. Right screen-edge pan. This is the same recognizer the original
-        //    dock reveal (setupEdgeGestureRecognizers) used, and it was the one
-        //    path that kept working while a guest app was fullscreen.
-        if withEdgePan {
-            let edgePan = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(handleSwipe(_:)))
-            edgePan.edges = .right
-            configure(edgePan)
-            view.addGestureRecognizer(edgePan)
-            recognizers.append(edgePan)
-        }
-
-        // 2. Plain pan over the bar. Needed when the safe area pushes the bar
-        //    away from the physical edge (landscape notch/home indicator).
-        let pan = UIPanGestureRecognizer(target: self, action: #selector(handleSwipe(_:)))
-        pan.maximumNumberOfTouches = 1
-        configure(pan)
-
-        // 3. Hold on the bar opens the dock. Press duration is tracked with our
-        //    own timer so the bar highlights immediately on touch down.
-        let hold = UILongPressGestureRecognizer(target: self, action: #selector(handleHold(_:)))
-        hold.minimumPressDuration = 0
-        hold.allowableMovement = .greatestFiniteMagnitude
-        configure(hold)
-
-        for recognizer in [pan, hold] {
-            view.addGestureRecognizer(recognizer)
-            recognizers.append(recognizer)
-        }
-    }
-
-    private func configure(_ recognizer: UIGestureRecognizer) {
-        recognizer.cancelsTouchesInView = false
-        recognizer.delaysTouchesBegan = false
-        recognizer.delaysTouchesEnded = false
-        recognizer.delegate = self
-    }
-
-    // MARK: - UIGestureRecognizerDelegate
-
-    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        guard let manager, manager.isHomeBarVisible, !manager.isVisible else { return false }
-        guard let view = gestureRecognizer.view else { return false }
-        guard manager.homeBarZoneRect(in: view).contains(touch.location(in: view)) else { return false }
-        // Probe: a window / bar recognizer actually received the touch.
-        manager.noteWindowGesture()
-        return true
-    }
-
-    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
-                           shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-        // Never block the guest app's own gestures; the bar recognizers only
-        // observe, they do not cancel the touches.
-        return true
-    }
-
-    // MARK: - Swipes
-
-    @objc private func handleSwipe(_ recognizer: UIPanGestureRecognizer) {
-        guard let manager else { return }
-        let translation = recognizer.translation(in: recognizer.view)
-
-        switch recognizer.state {
-        case .began:
-            begin(recognizer)
-            // Also start the hold timer here. On a fullscreen guest scene only
-            // the screen-edge pan reliably receives touches, so the "0.4 s hold"
-            // must be detectable from the pan itself (a tiny drag then hold).
-            scheduleHold()
-        case .changed:
-            if translation.x <= -MultitaskDockManager.Constants.homeSwipeDockDistance {
-                triggerDock()
-            } else if translation.x <= -MultitaskDockManager.Constants.homeSwipeHomeDistance {
-                // Clearly a swipe, not a hold.
-                cancelHold()
-            }
-        case .ended, .cancelled, .failed:
-            cancelHold()
-            let shouldGoHome = !dockTriggered
-                && !manager.isVisible
-                && translation.x <= -MultitaskDockManager.Constants.homeSwipeHomeDistance
-            end(recognizer)
-            if shouldGoHome {
-                triggerHome()
-            }
-        default:
-            break
-        }
-    }
-
-    // MARK: - Hold
-
-    @objc private func handleHold(_ recognizer: UILongPressGestureRecognizer) {
-        switch recognizer.state {
-        case .began:
-            begin(recognizer)
-            scheduleHold()
-        case .ended, .cancelled, .failed:
-            cancelHold()
-            end(recognizer)
-        default:
-            break
-        }
-    }
-
-    // MARK: - Raw application events
-
-    /// Called for every touch event that reaches LiveContainer. A touch that
-    /// starts inside the home bar zone is tracked here as well, so the bar keeps
-    /// working even if no window hit-test ever routes the touch to our views.
-    func handleAppEvent(_ event: UIEvent) {
-        guard event.type == .touches,
-              let touches = event.allTouches, !touches.isEmpty,
-              let manager else { return }
-        manager.noteAppEvent()
-
-        if rawTouchActive {
-            if let tracked = rawTouch {
-                // A new finger that is not the tracked one means the previous
-                // touch was lost without an `.ended` event (app switch, system
-                // gesture). Restart cleanly instead of staying stuck.
-                if !touches.contains(where: { $0 === tracked }),
-                   let newTouch = touches.first(where: { $0.phase == .began }) {
-                    endRawTouch()
-                    startRawTouch(newTouch, manager: manager)
-                    return
-                }
-                handleRawTouchUpdate(touches, manager: manager)
-            } else {
-                endRawTouch()
-                if manager.isHomeBarVisible, !manager.isVisible,
-                   let newTouch = touches.first(where: { $0.phase == .began }) {
-                    startRawTouch(newTouch, manager: manager)
-                }
-            }
-            return
-        }
-
-        // Only start tracking a fresh touch that begins inside the bar zone.
-        guard manager.isHomeBarVisible, !manager.isVisible else { return }
-        guard let newTouch = touches.first(where: { $0.phase == .began }) else { return }
-        startRawTouch(newTouch, manager: manager)
-    }
-
-    private func startRawTouch(_ touch: UITouch, manager: MultitaskDockManager) {
-        guard let window = manager.hostWindow else { return }
-        let point = touch.location(in: window)
-        guard manager.homeBarZoneRect(in: window).contains(point) else { return }
-
-        rawTouchActive = true
-        rawTouch = touch
-        rawTouchStart = point
-        rawDockTriggered = false
-        manager.noteBarTouch()
-        manager.setHomeBarPressed(true)
-        scheduleHold()
-        scheduleRawWatchdog()
-    }
-
-    private func handleRawTouchUpdate(_ touches: Set<UITouch>, manager: MultitaskDockManager) {
-        guard let tracked = rawTouch,
-              let touch = touches.first(where: { $0 === tracked }),
-              let start = rawTouchStart,
-              let window = manager.hostWindow else {
-            return
-        }
-
-        let translationX = touch.location(in: window).x - start.x
-
-        switch touch.phase {
-        case .moved:
-            if translationX <= -MultitaskDockManager.Constants.homeSwipeDockDistance {
-                rawDockTriggered = true
-                triggerDock()
-            } else if translationX <= -MultitaskDockManager.Constants.homeSwipeHomeDistance {
-                // Clearly a swipe, not a hold.
-                cancelHold()
-            }
-        case .ended, .cancelled:
-            cancelHold()
-            let shouldGoHome = !rawDockTriggered
-                && !manager.isVisible
-                && translationX <= -MultitaskDockManager.Constants.homeSwipeHomeDistance
-            endRawTouch()
-            if shouldGoHome {
-                triggerHome()
-            }
-        default:
-            break
-        }
-    }
-
-    private func scheduleRawWatchdog() {
-        rawWatchdog?.cancel()
-        let item = DispatchWorkItem { [weak self] in
-            self?.endRawTouch()
-        }
-        rawWatchdog = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: item)
-    }
-
-    private func endRawTouch() {
-        cancelHold()
-        rawWatchdog?.cancel()
-        rawWatchdog = nil
-        rawTouchActive = false
-        rawTouch = nil
-        rawTouchStart = nil
-        refreshPressed()
-    }
-
-    // MARK: - Shared interaction state
-
-    private func begin(_ recognizer: UIGestureRecognizer) {
-        activeRecognizers.insert(ObjectIdentifier(recognizer))
-        manager?.noteWindowGesture()
-        manager?.setHomeBarPressed(true)
-    }
-
-    private func end(_ recognizer: UIGestureRecognizer) {
-        activeRecognizers.remove(ObjectIdentifier(recognizer))
-        refreshPressed()
-    }
-
-    /// Clears the pressed state only when neither the recognizers nor the raw
-    /// event monitor are still tracking a touch.
-    private func refreshPressed() {
-        guard activeRecognizers.isEmpty, !rawTouchActive else { return }
-        dockTriggered = false
-        rawDockTriggered = false
-        manager?.setHomeBarPressed(false)
-    }
-
-    private func scheduleHold() {
-        cancelHold()
-        let item = DispatchWorkItem { [weak self] in
-            self?.triggerDock()
-        }
-        holdWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + MultitaskDockManager.Constants.homeLongPressDelay, execute: item)
-    }
-
-    private func cancelHold() {
-        holdWorkItem?.cancel()
-        holdWorkItem = nil
-    }
-
-    private func triggerDock() {
-        guard let manager, !dockTriggered, !manager.isVisible else { return }
-        dockTriggered = true
-        cancelHold()
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        manager.showDock()
-    }
-
-    private func triggerHome() {
-        guard let manager else { return }
-        // Several recognizers can report the same release; only go home once.
-        let now = Date().timeIntervalSince1970
-        guard now - lastHomeTrigger > 0.5 else { return }
-        lastHomeTrigger = now
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        manager.goHome()
     }
 }
 
@@ -1869,32 +1432,53 @@ struct LoadingIconView: View {
     }
 }
 
-// MARK: - Application Event Monitor
+// MARK: - Guest Process Bridge
 
-/// Swizzles `UIApplication.sendEvent(_:)` so home bar touches can be observed
-/// before (and independently of) window hit-testing. A fullscreen guest scene
-/// may hide touches from our windows, but the host application always receives
-/// the raw event first.
+/// In immersive fullscreen the guest app scene covers the whole screen and owns
+/// every touch over its viewport, so none of the host-side paths above ever run.
+/// The tweak injected into the guest process watches `UIApplication.sendEvent`
+/// there and reports the home bar gesture through Darwin notifications instead.
+/// Notifications carry no payload, so only the gesture phases are signalled and
+/// the guest resolves the distances itself.
 @available(iOS 16.0, *)
-enum HomeBarAppEventMonitor {
+enum HomeBarGuestBridge {
+    static let notificationPrefix = "com.eupdon.livecontainer.homebar."
+    static let beginSuffix = "begin"
+    static let holdSuffix = "hold"
+    static let dockSuffix = "dock"
+    static let homeSuffix = "home"
+    static let endSuffix = "end"
+    static let cancelSuffix = "cancel"
+
+    static let allSuffixes = [beginSuffix, holdSuffix, dockSuffix, homeSuffix, endSuffix, cancelSuffix]
+
     private static var installed = false
 
     static func install() {
         guard !installed else { return }
         installed = true
-        guard let original = class_getInstanceMethod(UIApplication.self, #selector(UIApplication.sendEvent(_:))),
-              let replacement = class_getInstanceMethod(UIApplication.self, #selector(UIApplication.lc_homeBar_sendEvent(_:))) else {
-            return
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        for suffix in allSuffixes {
+            let name = notificationPrefix + suffix
+            CFNotificationCenterAddObserver(center,
+                                            nil,
+                                            homeBarGuestNotificationCallback,
+                                            name as CFString,
+                                            nil,
+                                            .deliverImmediately)
         }
-        method_exchangeImplementations(original, replacement)
     }
 }
 
-@available(iOS 16.0, *)
-extension UIApplication {
-    /// After swizzling, calling this invokes the original `sendEvent(_:)`.
-    @objc fileprivate func lc_homeBar_sendEvent(_ event: UIEvent) {
-        lc_homeBar_sendEvent(event)
-        MultitaskDockManager.shared.homeBarGestureHandler.handleAppEvent(event)
+/// Darwin notification callback for the guest bridge. It cannot capture state,
+/// so the notification name is forwarded to the manager on the main queue,
+/// where all home bar state lives.
+private let homeBarGuestNotificationCallback: CFNotificationCallback = { _, _, name, _, _ in
+    guard let name else { return }
+    let rawName = name.rawValue as String
+    DispatchQueue.main.async {
+        if #available(iOS 16.0, *) {
+            MultitaskDockManager.shared.handleGuestSignal(rawName)
+        }
     }
 }
