@@ -786,9 +786,12 @@ static LCControlAppURLHandling LCHandleControlAppURL(NSURL *url, NSString** modi
 
 // In immersive multitasking (LCLaunchMultitaskMaximized) the guest scene covers
 // the whole screen and the host process never receives touches over it, so the
-// home bar / dock reveal gesture has to be detected in this process. Only the
-// gesture phases are reported through Darwin notifications: the host resolves
-// what to do with them, exactly like it does for host-received touches.
+// home bar gesture has to be detected in this process. Only the gesture phases
+// are reported through Darwin notifications: the host resolves what to do with
+// them, exactly like it does for host-received touches.
+//
+// Mapping: a left swipe of any length (>= 30 pt) goes home, a hold (>= 0.4 s
+// without moving) opens the dock.
 
 static NSString* const LCHomeBarNotificationPrefix = @"com.eupdon.livecontainer.homebar.";
 
@@ -797,13 +800,12 @@ static CGPoint lcHomeBarStartPoint = {0, 0};
 static CGPoint lcHomeBarLastPoint = {0, 0};
 static BOOL lcHomeBarTracking = NO;
 static BOOL lcHomeBarMoved = NO;
-static BOOL lcHomeBarDockFired = NO;
+static BOOL lcHomeBarHoldFired = NO;
 static dispatch_block_t lcHomeBarHoldBlock = nil;
 static dispatch_block_t lcHomeBarWatchdogBlock = nil;
 
 // Same thresholds as MultitaskDockManager.Constants on the host side.
 static const CGFloat LCHomeBarHomeDistance = 30.0;
-static const CGFloat LCHomeBarDockDistance = 110.0;
 static const CGFloat LCHomeBarHoldDelay = 0.4;
 static const CGFloat LCHomeBarMovementTolerance = 12.0;
 // Touch area: right screen edge, vertically centered. Matches the host's
@@ -857,8 +859,8 @@ static BOOL LCGuestWindowCoversScreen(UIWindow* window) {
 static void LCHomeBarScheduleHold(void) {
     LCHomeBarCancelHold();
     dispatch_block_t hold = dispatch_block_create(0, ^{
-        if(!lcHomeBarTracking || lcHomeBarMoved || lcHomeBarDockFired) return;
-        lcHomeBarDockFired = YES;
+        if(!lcHomeBarTracking || lcHomeBarMoved || lcHomeBarHoldFired) return;
+        lcHomeBarHoldFired = YES;
         LCPostHomeBarNotification(@"hold");
     });
     lcHomeBarHoldBlock = hold;
@@ -875,7 +877,7 @@ static void LCHomeBarScheduleWatchdog(void) {
         lcHomeBarTrackedTouch = nil;
         lcHomeBarTracking = NO;
         lcHomeBarMoved = NO;
-        lcHomeBarDockFired = NO;
+        lcHomeBarHoldFired = NO;
     });
     lcHomeBarWatchdogBlock = watchdog;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(LCHomeBarWatchdogDelay * NSEC_PER_SEC)),
@@ -889,7 +891,7 @@ static void LCHomeBarFinishTouch(UITouch* touch, BOOL cancelled) {
     // `touch.window` can already be nil by the time the end event arrives, so the
     // distance is measured against the last location seen while moving.
     CGFloat dx = lcHomeBarLastPoint.x - lcHomeBarStartPoint.x;
-    if(!cancelled && !lcHomeBarDockFired && dx <= -LCHomeBarHomeDistance) {
+    if(!cancelled && !lcHomeBarHoldFired && dx <= -LCHomeBarHomeDistance) {
         LCPostHomeBarNotification(@"home");
     }
     LCPostHomeBarNotification(cancelled ? @"cancel" : @"end");
@@ -897,7 +899,7 @@ static void LCHomeBarFinishTouch(UITouch* touch, BOOL cancelled) {
     lcHomeBarTrackedTouch = nil;
     lcHomeBarTracking = NO;
     lcHomeBarMoved = NO;
-    lcHomeBarDockFired = NO;
+    lcHomeBarHoldFired = NO;
 }
 
 static void LCGuestHandleHomeBarEvent(UIEvent* event) {
@@ -923,14 +925,9 @@ static void LCGuestHandleHomeBarEvent(UIEvent* event) {
                 CGFloat dx = point.x - lcHomeBarStartPoint.x;
                 CGFloat dy = point.y - lcHomeBarStartPoint.y;
                 if(!lcHomeBarMoved && (fabs(dx) > LCHomeBarMovementTolerance || fabs(dy) > LCHomeBarMovementTolerance)) {
-                    // Clearly a drag, not a hold.
+                    // Clearly a drag, not the hold that opens the dock.
                     lcHomeBarMoved = YES;
                     LCHomeBarCancelHold();
-                }
-                if(!lcHomeBarDockFired && dx <= -LCHomeBarDockDistance) {
-                    lcHomeBarDockFired = YES;
-                    LCHomeBarCancelHold();
-                    LCPostHomeBarNotification(@"dock");
                 }
                 break;
             }
@@ -965,7 +962,7 @@ static void LCGuestHandleHomeBarEvent(UIEvent* event) {
         lcHomeBarLastPoint = point;
         lcHomeBarTracking = YES;
         lcHomeBarMoved = NO;
-        lcHomeBarDockFired = NO;
+        lcHomeBarHoldFired = NO;
         lcHomeBarTrackedTouch = touch;
         LCPostHomeBarNotification(@"begin");
         LCHomeBarScheduleHold();
