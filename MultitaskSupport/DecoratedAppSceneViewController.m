@@ -17,9 +17,6 @@
 @property(nonatomic) bool isAppTerminationRequested;
 // When "launch maximized" is enabled the window is locked to fullscreen with no title bar
 @property(nonatomic) BOOL immersiveMode;
-// Horizontal space reserved on the right for the multitask dock while it is
-// shown next to an immersive window.
-@property(nonatomic) CGFloat dockRevealOffset;
 @end
 
 @implementation DecoratedAppSceneViewController
@@ -399,44 +396,23 @@
         settings.deviceOrientation = baseSettings.deviceOrientation;
         settings.foreground = YES;
         
-        [self applySceneFrameForSettings:settings];
+        if(self.isMaximized) {
+            [self updateMaximizedFrameWithSettings:settings];
+        } else {
+            [self updateWindowedFrameWithSettings:settings];
+        }
+        CGRect newFrame = CGRectMake(0, 0, self.view.bounds.size.width, self.view.bounds.size.height - self.navigationBar.frame.size.height/self.scaleRatio);
+        
+        if(UIInterfaceOrientationIsLandscape(baseSettings.interfaceOrientation)) {
+            settings.frame = CGRectMake(0, 0, newFrame.size.height, newFrame.size.width);
+        } else {
+            settings.frame = CGRectMake(0, 0, newFrame.size.width, newFrame.size.height);
+        }
     }];
-}
-
-// Applies the current window geometry to the scene. Shared by the normal
-// settings delegate and the dock reveal so both stay in sync.
-- (void)applySceneFrameForSettings:(UIMutableApplicationSceneSettings *)settings {
-    if(self.isMaximized) {
-        [self updateMaximizedFrameWithSettings:settings];
-    } else {
-        [self updateWindowedFrameWithSettings:settings];
-    }
-    CGRect newFrame = CGRectMake(0, 0, self.view.bounds.size.width, self.view.bounds.size.height - self.navigationBar.frame.size.height/self.scaleRatio);
-    
-    if(UIInterfaceOrientationIsLandscape(settings.interfaceOrientation)) {
-        settings.frame = CGRectMake(0, 0, newFrame.size.height, newFrame.size.width);
-    } else {
-        settings.frame = CGRectMake(0, 0, newFrame.size.width, newFrame.size.height);
-    }
 }
 
 - (BOOL)immersiveFullscreen {
     return _immersiveMode && _isMaximized;
-}
-
-// Shrinks the immersive window from the right so the dock strip is no longer
-// covered by the guest scene. Without this the dock would be drawn above the
-// app but every touch on it would be delivered to the guest process.
-- (void)setDockRevealOffset:(CGFloat)offset animated:(BOOL)animated {
-    if(!_immersiveMode || !_isMaximized) return;
-    if(fabs(_dockRevealOffset - offset) < 0.5) return;
-    _dockRevealOffset = offset;
-    
-    self.appSceneVC.shouldSkipDebounceOnce = YES;
-    __weak typeof(self) weakSelf = self;
-    [self.appSceneVC updateSettingsWithBlock:^(UIMutableApplicationSceneSettings *settings) {
-        [weakSelf applySceneFrameForSettings:settings];
-    }];
 }
 
 - (void)adjustNavigationBarButtonSpacingWithNegativeSpacing:(CGFloat)spacing rightMargin:(CGFloat)margin {
@@ -600,10 +576,6 @@
 
 - (void)updateMaximizedFrameWithSettings:(UIMutableApplicationSceneSettings *)settings {
     CGRect maxFrame = UIEdgeInsetsInsetRect(self.view.window.frame, [self updateMaximizedSafeAreaWithSettings:settings]);
-    // While the dock is revealed the immersive window gives up the right strip.
-    if(_dockRevealOffset > 0.5) {
-        maxFrame.size.width = MAX(160.0, maxFrame.size.width - _dockRevealOffset);
-    }
     self.view.frame = maxFrame;
 }
 

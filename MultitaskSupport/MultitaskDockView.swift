@@ -200,7 +200,7 @@ class AppInfoProvider {
         static let homeBarVisualWidth: CGFloat = 6.0
         static let homeBarVisualHeight: CGFloat = 88.0
         static let homeSwipeHomeDistance: CGFloat = 30.0
-        static let homeSwipeDockDistance: CGFloat = 110.0
+        static let homeBarMoveTolerance: CGFloat = 12.0
         static let homeLongPressDelay: TimeInterval = 0.4
         
         static let standardAnimationDuration: TimeInterval = 0.3
@@ -386,17 +386,6 @@ class AppInfoProvider {
         !immersiveWindowControllers.isEmpty
     }
 
-    /// In immersive fullscreen the guest scene receives every touch over its
-    /// viewport, so a dock drawn on top of it can never be tapped. Freeing the
-    /// dock strip by shrinking the immersive window is what makes the dock usable
-    /// there, and it mirrors the original hidden-dock reveal animation.
-    private func updateImmersiveDockReveal(_ revealed: Bool) {
-        let offset = revealed ? dockWidth : 0
-        for vc in immersiveWindowControllers {
-            vc.setDockRevealOffset(offset, animated: true)
-        }
-    }
-
     /// The home bar strip on the right screen edge, in the host window's space.
     internal var homeBarZoneRect: CGRect {
         guard let hostWindow else { return .zero }
@@ -499,10 +488,10 @@ class AppInfoProvider {
             setHomeBarPressed(true)
             scheduleHomeBarHold()
         case .changed:
-            if translation.x <= -Constants.homeSwipeDockDistance {
-                triggerDockFromHomeBar()
-            } else if translation.x <= -Constants.homeSwipeHomeDistance {
-                // Clearly a swipe, not a hold.
+            // Any real movement means this is a swipe, not the hold that opens
+            // the dock, so stop the hold timer.
+            if abs(translation.x) > Constants.homeBarMoveTolerance
+                || abs(translation.y) > Constants.homeBarMoveTolerance {
                 cancelHomeBarHold()
             }
         case .ended, .cancelled, .failed:
@@ -585,12 +574,22 @@ class AppInfoProvider {
         }
     }
 
-    private func insertDockDismissView(in container: UIView) {
+    private func insertDockDismissView(in container: UIView, blurred: Bool) {
         removeDockDismissView()
 
-        let dismissView = UIView(frame: container.bounds)
-        dismissView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        dismissView.backgroundColor = UIColor.black.withAlphaComponent(0.12)
+        let dismissView: UIView
+        if blurred {
+            // Fullscreen: the app list sits right behind the dock, so blur it
+            // instead of just dimming it.
+            let blurView = UIVisualEffectView(effect: UIBlurEffect(style: .systemThinMaterialDark))
+            blurView.frame = container.bounds
+            blurView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            dismissView = blurView
+        } else {
+            dismissView = UIView(frame: container.bounds)
+            dismissView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            dismissView.backgroundColor = UIColor.black.withAlphaComponent(0.12)
+        }
         dismissView.isUserInteractionEnabled = true
 
         let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleDockDismissTap))
@@ -631,9 +630,6 @@ class AppInfoProvider {
     @objc public func goHome() {
         minimizeAllWindows()
         DispatchQueue.main.async {
-            // The dock may never have been visible, so restore the immersive
-            // windows explicitly instead of relying on hideDock's completion.
-            self.updateImmersiveDockReveal(false)
             DataManager.shared.model.selectedTab = .apps
             self.hideDock()
         }
@@ -766,8 +762,14 @@ class AppInfoProvider {
         DispatchQueue.main.async {
             self.isVisible = true
             self.hideHomeBar()
-            // Make sure the dock strip is not covered by an immersive guest scene.
-            self.updateImmersiveDockReveal(true)
+            // In immersive fullscreen the guest scene swallows every touch over
+            // its viewport, so the dock could not be tapped on top of it. Going
+            // home first keeps the app at its fullscreen size instead of
+            // shrinking it: the dock then floats over the blurred app list.
+            let immersiveFullscreen = self.hasImmersiveFullscreenApp
+            if immersiveFullscreen {
+                self.minimizeAllWindows()
+            }
             
             let screenBounds = hostWindow.bounds
             let container = hostWindow
@@ -785,8 +787,8 @@ class AppInfoProvider {
                 )
             }
 
-            // Dim / tap-out layer below the dock, above app windows
-            self.insertDockDismissView(in: container)
+            // Tap-out layer below the dock, above app windows
+            self.insertDockDismissView(in: container, blurred: immersiveFullscreen)
             container.bringSubviewToFront(hostingController.view)
             
             self.updateDockFrame(animated: false) 
@@ -832,7 +834,6 @@ class AppInfoProvider {
                 self.isVisible = false
                 hostingController.view.transform = .identity
                 self.removeDockDismissView()
-                self.updateImmersiveDockReveal(false)
                 self.showHomeBar()
             }
         }
