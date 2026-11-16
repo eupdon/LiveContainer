@@ -790,8 +790,7 @@ static LCControlAppURLHandling LCHandleControlAppURL(NSURL *url, NSString** modi
 // are reported through Darwin notifications: the host resolves what to do with
 // them, exactly like it does for host-received touches.
 //
-// Mapping: a left swipe of any length (>= 30 pt) goes home, a hold (>= 0.4 s
-// without moving) opens the dock.
+// Mapping: a left swipe (>= 30 pt) before lifting the finger goes home.
 
 static NSString* const LCHomeBarNotificationPrefix = @"com.eupdon.livecontainer.homebar.";
 
@@ -799,33 +798,28 @@ static __weak UITouch* lcHomeBarTrackedTouch = nil;
 static CGPoint lcHomeBarStartPoint = {0, 0};
 static CGPoint lcHomeBarLastPoint = {0, 0};
 static BOOL lcHomeBarTracking = NO;
-static BOOL lcHomeBarMoved = NO;
-static BOOL lcHomeBarHoldFired = NO;
-static dispatch_block_t lcHomeBarHoldBlock = nil;
 static dispatch_block_t lcHomeBarWatchdogBlock = nil;
 
 // Same thresholds as MultitaskDockManager.Constants on the host side.
 static const CGFloat LCHomeBarHomeDistance = 30.0;
-static const CGFloat LCHomeBarHoldDelay = 0.4;
-static const CGFloat LCHomeBarMovementTolerance = 12.0;
-// Touch area: right screen edge, vertically centered. Matches the host's
-// home bar zone (30 x 150 pt) with a tiny tolerance.
+// Touch area: right screen edge, vertically centered. Its height follows the
+// user's home bar length setting (default 88 pt), exactly like the host does.
 static const CGFloat LCHomeBarTouchWidth = 32.0;
-static const CGFloat LCHomeBarTouchHeight = 80.0;
+static const CGFloat LCHomeBarDefaultLength = 88.0;
 static const NSTimeInterval LCHomeBarWatchdogDelay = 6.0;
+
+static CGFloat LCHomeBarTouchHalfHeight(void) {
+    double length = [NSUserDefaults.lcSharedDefaults doubleForKey:@"LCHomeBarLength"];
+    if(length <= 0) length = LCHomeBarDefaultLength;
+    CGFloat touchHeight = MAX(150.0, (CGFloat)length + 40.0);
+    return touchHeight / 2.0;
+}
 
 static void LCPostHomeBarNotification(NSString* suffix) {
     NSString* name = [LCHomeBarNotificationPrefix stringByAppendingString:suffix];
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          (__bridge CFStringRef)name,
                                          NULL, NULL, true);
-}
-
-static void LCHomeBarCancelHold(void) {
-    if(lcHomeBarHoldBlock) {
-        dispatch_block_cancel(lcHomeBarHoldBlock);
-        lcHomeBarHoldBlock = nil;
-    }
 }
 
 static void LCHomeBarCancelWatchdog(void) {
@@ -856,28 +850,13 @@ static BOOL LCGuestWindowCoversScreen(UIWindow* window) {
     return fabs(windowShort - screenShort) <= 2.0 && fabs(windowLong - screenLong) <= 2.0;
 }
 
-static void LCHomeBarScheduleHold(void) {
-    LCHomeBarCancelHold();
-    dispatch_block_t hold = dispatch_block_create(0, ^{
-        if(!lcHomeBarTracking || lcHomeBarMoved || lcHomeBarHoldFired) return;
-        lcHomeBarHoldFired = YES;
-        LCPostHomeBarNotification(@"hold");
-    });
-    lcHomeBarHoldBlock = hold;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(LCHomeBarHoldDelay * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), hold);
-}
-
 static void LCHomeBarScheduleWatchdog(void) {
     LCHomeBarCancelWatchdog();
     dispatch_block_t watchdog = dispatch_block_create(0, ^{
         if(!lcHomeBarTracking) return;
-        LCHomeBarCancelHold();
         LCPostHomeBarNotification(@"cancel");
         lcHomeBarTrackedTouch = nil;
         lcHomeBarTracking = NO;
-        lcHomeBarMoved = NO;
-        lcHomeBarHoldFired = NO;
     });
     lcHomeBarWatchdogBlock = watchdog;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(LCHomeBarWatchdogDelay * NSEC_PER_SEC)),
@@ -885,21 +864,18 @@ static void LCHomeBarScheduleWatchdog(void) {
 }
 
 static void LCHomeBarFinishTouch(UITouch* touch, BOOL cancelled) {
-    LCHomeBarCancelHold();
     LCHomeBarCancelWatchdog();
 
     // `touch.window` can already be nil by the time the end event arrives, so the
     // distance is measured against the last location seen while moving.
     CGFloat dx = lcHomeBarLastPoint.x - lcHomeBarStartPoint.x;
-    if(!cancelled && !lcHomeBarHoldFired && dx <= -LCHomeBarHomeDistance) {
+    if(!cancelled && dx <= -LCHomeBarHomeDistance) {
         LCPostHomeBarNotification(@"home");
     }
     LCPostHomeBarNotification(cancelled ? @"cancel" : @"end");
 
     lcHomeBarTrackedTouch = nil;
     lcHomeBarTracking = NO;
-    lcHomeBarMoved = NO;
-    lcHomeBarHoldFired = NO;
 }
 
 static void LCGuestHandleHomeBarEvent(UIEvent* event) {
@@ -921,16 +897,8 @@ static void LCGuestHandleHomeBarEvent(UIEvent* event) {
         switch(tracked.phase) {
             case UITouchPhaseBegan:
                 break;
-            case UITouchPhaseMoved: {
-                CGFloat dx = point.x - lcHomeBarStartPoint.x;
-                CGFloat dy = point.y - lcHomeBarStartPoint.y;
-                if(!lcHomeBarMoved && (fabs(dx) > LCHomeBarMovementTolerance || fabs(dy) > LCHomeBarMovementTolerance)) {
-                    // Clearly a drag, not the hold that opens the dock.
-                    lcHomeBarMoved = YES;
-                    LCHomeBarCancelHold();
-                }
+            case UITouchPhaseMoved:
                 break;
-            }
             case UITouchPhaseEnded:
                 LCHomeBarFinishTouch(tracked, NO);
                 break;
@@ -956,16 +924,13 @@ static void LCGuestHandleHomeBarEvent(UIEvent* event) {
         CGRect bounds = window.bounds;
         CGPoint point = [touch locationInView:window];
         if(point.x < bounds.size.width - LCHomeBarTouchWidth) continue;
-        if(fabs(point.y - bounds.size.height / 2.0) > LCHomeBarTouchHeight) continue;
+        if(fabs(point.y - bounds.size.height / 2.0) > LCHomeBarTouchHalfHeight()) continue;
 
         lcHomeBarStartPoint = point;
         lcHomeBarLastPoint = point;
         lcHomeBarTracking = YES;
-        lcHomeBarMoved = NO;
-        lcHomeBarHoldFired = NO;
         lcHomeBarTrackedTouch = touch;
         LCPostHomeBarNotification(@"begin");
-        LCHomeBarScheduleHold();
         LCHomeBarScheduleWatchdog();
         break;
     }
