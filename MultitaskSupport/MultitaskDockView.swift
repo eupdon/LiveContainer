@@ -139,14 +139,11 @@ class AppInfoProvider {
     @objc public var windowHostingView = VirtualWindowsHostView()
     internal var hostingController: UIHostingController<AnyView>?
     internal var homeBarController: UIHostingController<AnyView>?
-    private var dockDismissView: UIView?
 
     // The window that actually hosts the guest apps.
     private var hostWindowStorage: UIWindow?
     internal var isHomeBarVisible = false
     @Published internal var isHomeBarPressed: Bool = false
-    private var homeBarHoldWorkItem: DispatchWorkItem?
-    private var homeBarDockTriggered = false
 
     public struct Constants {
         // MARK: - Layout & Sizing
@@ -196,12 +193,18 @@ class AppInfoProvider {
 
         // MARK: - Home Bar (right edge)
         static let homeBarTouchWidth: CGFloat = 30.0
-        static let homeBarTouchHeight: CGFloat = 150.0
         static let homeBarVisualWidth: CGFloat = 6.0
-        static let homeBarVisualHeight: CGFloat = 88.0
         static let homeSwipeHomeDistance: CGFloat = 30.0
-        static let homeBarMoveTolerance: CGFloat = 12.0
-        static let homeLongPressDelay: TimeInterval = 0.4
+        // User setting: vertical length of the home bar capsule.
+        static let defaultHomeBarLength: CGFloat = 88.0
+        static var homeBarLength: CGFloat {
+            let stored = LCUtils.appGroupUserDefault.double(forKey: "LCHomeBarLength")
+            return stored > 0 ? CGFloat(stored) : defaultHomeBarLength
+        }
+        // Touch area: tall enough to grab, and never shorter than the capsule.
+        static var homeBarTouchHeight: CGFloat {
+            max(150.0, homeBarLength + 40.0)
+        }
         
         static let standardAnimationDuration: TimeInterval = 0.3
         static let longAnimationDuration: TimeInterval = 0.4
@@ -237,7 +240,8 @@ class AppInfoProvider {
         let requiredHeight = expandedDockHeight(for: userWidth, iconSize: iconSize)
         
         if requiredHeight > maxSafeHeight && !apps.isEmpty {
-            let baseHeight = expandedDockBaseHeight()
+            let buttonSize = calculateButtonSize(for: userWidth)
+            let baseHeight = expandedDockBaseHeight(for: userWidth, buttonSize: buttonSize)
             let availableForIcons = maxSafeHeight - baseHeight
             let maxAllowedIconSize = availableForIcons / CGFloat(apps.count)
             
@@ -262,15 +266,15 @@ class AppInfoProvider {
         return max(Constants.minCollapsedButtonSize, min(Constants.maxCollapsedButtonSize, targetSize))
     }
 
-    private func expandedDockBaseHeight() -> CGFloat {
-        // The dock now only contains running-app icons (no collapse / minimize-all buttons)
-        let spacingCount = max(self.apps.count - 1, 0)
+    private func expandedDockBaseHeight(for width: CGFloat, buttonSize: CGFloat) -> CGFloat {
+        let spacingCount = max(self.apps.count + 1, 0)
         let totalSpacingHeight = CGFloat(spacingCount) * Constants.dockContentSpacing
-        return Constants.dockVerticalPadding + totalSpacingHeight
+        return Constants.dockVerticalPadding + buttonSize * 2 + totalSpacingHeight
     }
 
     private func expandedDockHeight(for width: CGFloat, iconSize: CGFloat) -> CGFloat {
-        let baseHeight = expandedDockBaseHeight()
+        let buttonSize = calculateButtonSize(for: width)
+        let baseHeight = expandedDockBaseHeight(for: width, buttonSize: buttonSize)
         let iconHeight = CGFloat(self.apps.count) * iconSize
         return baseHeight + iconHeight
     }
@@ -280,7 +284,6 @@ class AppInfoProvider {
         return Constants.dockVerticalPadding + buttonSize
     }
     
-
     // Calculate adaptive icon size
     public var adaptiveIconSize: CGFloat {
         return calculateIconSize(for: dockWidth)
@@ -423,15 +426,10 @@ class AppInfoProvider {
 
         let pan = UIPanGestureRecognizer(target: self, action: #selector(handleHomeBarPan(_:)))
         pan.maximumNumberOfTouches = 1
-        let hold = UILongPressGestureRecognizer(target: self, action: #selector(handleHomeBarHold(_:)))
-        hold.minimumPressDuration = 0
-        hold.allowableMovement = .greatestFiniteMagnitude
-        for recognizer in [pan, hold] as [UIGestureRecognizer] {
-            recognizer.cancelsTouchesInView = false
-            recognizer.delaysTouchesBegan = false
-            recognizer.delaysTouchesEnded = false
-            controller.view.addGestureRecognizer(recognizer)
-        }
+        pan.cancelsTouchesInView = false
+        pan.delaysTouchesBegan = false
+        pan.delaysTouchesEnded = false
+        controller.view.addGestureRecognizer(pan)
         homeBarController = controller
     }
 
@@ -470,7 +468,6 @@ class AppInfoProvider {
             guard let controller = self.homeBarController else { return }
             self.isHomeBarVisible = false
             self.setHomeBarPressed(false)
-            self.cancelHomeBarHold()
             controller.view.isUserInteractionEnabled = false
             UIView.animate(withDuration: Constants.shortAnimationDuration1) {
                 controller.view.alpha = 0
@@ -484,68 +481,16 @@ class AppInfoProvider {
         let translation = recognizer.translation(in: recognizer.view)
         switch recognizer.state {
         case .began:
-            homeBarDockTriggered = false
             setHomeBarPressed(true)
-            scheduleHomeBarHold()
-        case .changed:
-            // Any real movement means this is a swipe, not the hold that opens
-            // the dock, so stop the hold timer.
-            if abs(translation.x) > Constants.homeBarMoveTolerance
-                || abs(translation.y) > Constants.homeBarMoveTolerance {
-                cancelHomeBarHold()
-            }
         case .ended, .cancelled, .failed:
-            cancelHomeBarHold()
             setHomeBarPressed(false)
-            let shouldGoHome = !homeBarDockTriggered
-                && !isVisible
-                && translation.x <= -Constants.homeSwipeHomeDistance
-            homeBarDockTriggered = false
-            if shouldGoHome {
+            if !isVisible && translation.x <= -Constants.homeSwipeHomeDistance {
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                 goHome()
             }
         default:
             break
         }
-    }
-
-    @objc private func handleHomeBarHold(_ recognizer: UILongPressGestureRecognizer) {
-        switch recognizer.state {
-        case .began:
-            homeBarDockTriggered = false
-            setHomeBarPressed(true)
-            scheduleHomeBarHold()
-        case .ended, .cancelled, .failed:
-            cancelHomeBarHold()
-            setHomeBarPressed(false)
-            homeBarDockTriggered = false
-        default:
-            break
-        }
-    }
-
-    private func scheduleHomeBarHold() {
-        cancelHomeBarHold()
-        let item = DispatchWorkItem { [weak self] in
-            self?.triggerDockFromHomeBar()
-        }
-        homeBarHoldWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + Constants.homeLongPressDelay, execute: item)
-    }
-
-    private func cancelHomeBarHold() {
-        homeBarHoldWorkItem?.cancel()
-        homeBarHoldWorkItem = nil
-    }
-
-    private func triggerDockFromHomeBar() {
-        guard !homeBarDockTriggered, !isVisible else { return }
-        homeBarDockTriggered = true
-        cancelHomeBarHold()
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        setHomeBarPressed(false)
-        showDock()
     }
 
     // MARK: - Guest Process Signals
@@ -559,61 +504,14 @@ class AppInfoProvider {
         case HomeBarGuestBridge.beginSuffix:
             guard isHomeBarVisible, !isVisible else { return }
             setHomeBarPressed(true)
-        case HomeBarGuestBridge.holdSuffix, HomeBarGuestBridge.dockSuffix:
-            triggerDockFromHomeBar()
         case HomeBarGuestBridge.homeSuffix:
-            cancelHomeBarHold()
             setHomeBarPressed(false)
-            guard !isVisible, !homeBarDockTriggered else { return }
+            guard !isVisible else { return }
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             goHome()
         default:
-            cancelHomeBarHold()
             setHomeBarPressed(false)
-            homeBarDockTriggered = false
         }
-    }
-
-    private func insertDockDismissView(in container: UIView, blurred: Bool) {
-        removeDockDismissView()
-
-        let dismissView: UIView
-        if blurred {
-            // Fullscreen: the app list sits right behind the dock, so blur it
-            // instead of just dimming it.
-            let blurView = UIVisualEffectView(effect: UIBlurEffect(style: .systemThinMaterialDark))
-            blurView.frame = container.bounds
-            blurView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            dismissView = blurView
-        } else {
-            dismissView = UIView(frame: container.bounds)
-            dismissView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            dismissView.backgroundColor = UIColor.black.withAlphaComponent(0.12)
-        }
-        dismissView.isUserInteractionEnabled = true
-
-        let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleDockDismissTap))
-        dismissView.addGestureRecognizer(tapGesture)
-
-        let swipeGesture = UISwipeGestureRecognizer(target: self, action: #selector(handleDockDismissSwipe))
-        swipeGesture.direction = .left
-        dismissView.addGestureRecognizer(swipeGesture)
-
-        container.addSubview(dismissView)
-        self.dockDismissView = dismissView
-    }
-
-    private func removeDockDismissView() {
-        dockDismissView?.removeFromSuperview()
-        dockDismissView = nil
-    }
-
-    @objc private func handleDockDismissTap() {
-        hideDock()
-    }
-
-    @objc private func handleDockDismissSwipe() {
-        goHome()
     }
 
     // MARK: - Window Actions
@@ -754,31 +652,21 @@ class AppInfoProvider {
     }
     
     @objc public func showDock() {
-        guard isDockEnabled(), !apps.isEmpty else { return }
+        guard isDockEnabled() else { return }
         guard !isVisible, let hostingController = hostingController else { return }
         
-        guard let hostWindow = self.hostWindow else { return }
+        guard let keyWindow = self.keyWindow else { return }
         
         DispatchQueue.main.async {
             self.isVisible = true
-            self.hideHomeBar()
-            // In immersive fullscreen the guest scene swallows every touch over
-            // its viewport, so the dock could not be tapped on top of it. Going
-            // home first keeps the app at its fullscreen size instead of
-            // shrinking it: the dock then floats over the blurred app list.
-            let immersiveFullscreen = self.hasImmersiveFullscreenApp
-            if immersiveFullscreen {
-                self.minimizeAllWindows()
-            }
             
-            let screenBounds = hostWindow.bounds
-            let container = hostWindow
+            let screenBounds = keyWindow.bounds
             let currentDockWidth = self.dockWidth
             let initialHeight = Constants.initialDockShowHeight
             
             // If not already in view hierarchy, add it
-            if hostingController.view.superview !== container {
-                container.addSubview(hostingController.view)
+            if hostingController.view.superview == nil {
+                keyWindow.addSubview(hostingController.view)
                 hostingController.view.frame = CGRect(
                     x: screenBounds.width - currentDockWidth,
                     y: (screenBounds.height - initialHeight) / 2,
@@ -786,12 +674,10 @@ class AppInfoProvider {
                     height: initialHeight
                 )
             }
-
-            // Tap-out layer below the dock, above app windows
-            self.insertDockDismissView(in: container, blurred: immersiveFullscreen)
-            container.bringSubviewToFront(hostingController.view)
             
             self.updateDockFrame(animated: false) 
+            
+            self.setupEdgeGestureRecognizers()
             
             hostingController.view.alpha = 0
             let initialScale = Constants.initialScale
@@ -825,7 +711,7 @@ class AppInfoProvider {
                 let finalScale = Constants.initialScale
                 hostingController.view.transform = CGAffineTransform(scaleX: finalScale, y: finalScale)
                 // Move off-screen to hide, but keep in view hierarchy
-                let screenBounds = self.hostWindow?.bounds ?? UIScreen.main.bounds
+                let screenBounds = self.keyWindow!.bounds
                 let currentDockWidth = self.dockWidth
                 let targetX = self.calculateTargetX(isDockHidden: true, isOnRightSide: hostingController.view.frame.midX > screenBounds.width / 2, dockWidth: currentDockWidth, screenWidth: screenBounds.width)
                 let targetY = hostingController.view.frame.origin.y // Keep current Y
@@ -833,7 +719,6 @@ class AppInfoProvider {
             } completion: { _ in
                 self.isVisible = false
                 hostingController.view.transform = .identity
-                self.removeDockDismissView()
                 self.showHomeBar()
             }
         }
@@ -1080,6 +965,7 @@ class AppInfoProvider {
         DispatchQueue.main.async {
             self.isDockHidden = false
             self.updateDockFrame()
+            self.setupEdgeGestureRecognizers()
         }
     }
     
@@ -1087,6 +973,40 @@ class AppInfoProvider {
         DispatchQueue.main.async {
             self.isDockHidden = true
             self.updateDockFrame()
+            self.setupEdgeGestureRecognizers()
+        }
+    }
+    
+    // Add edge gesture recognition areas when dock is hidden
+    private func setupEdgeGestureRecognizers() {
+        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let keyWindow = windowScene.windows.first else { return }
+        
+        keyWindow.gestureRecognizers?.removeAll { gesture in
+            return gesture is UITapGestureRecognizer || gesture is UIScreenEdgePanGestureRecognizer
+        }
+        
+        if isDockHidden {
+            let leftEdgeGesture = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(handleEdgeSwipe(_:)))
+            leftEdgeGesture.edges = .left
+            keyWindow.addGestureRecognizer(leftEdgeGesture)
+            
+            let rightEdgeGesture = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(handleEdgeSwipe(_:)))
+            rightEdgeGesture.edges = .right
+            keyWindow.addGestureRecognizer(rightEdgeGesture)
+        }
+    }
+    
+    @objc private func handleEdgeSwipe(_ gesture: UIScreenEdgePanGestureRecognizer) {
+        guard isDockHidden, gesture.state == .began || gesture.state == .changed else {
+            return
+        }
+        
+        let translation = gesture.translation(in: gesture.view)
+        let swipeDistance = abs(translation.x)
+        
+        if swipeDistance > Constants.edgeSwipeThreshold {
+            showDockFromHidden()
         }
     }
     
@@ -1101,6 +1021,9 @@ class AppInfoProvider {
 @available(iOS 16.0, *)
 public struct MultitaskDockSwiftView: View {
     @EnvironmentObject var dockManager: MultitaskDockManager
+    @State private var dragOffset = CGSize.zero
+    @State private var isMoving: Bool = false
+    @AppStorage("LCHideCollapsedDock", store: LCUtils.appGroupUserDefault) var hideCollapsedDock: Bool = false
     
     // Calculate dynamic padding based on user settings
     private var dynamicPadding: CGFloat {
@@ -1111,10 +1034,28 @@ public struct MultitaskDockSwiftView: View {
     
     public var body: some View {
         GeometryReader { g in
-            // The dock only shows running apps: no collapse, maximize or minimize-all controls
             VStack(spacing: 8) {
-                ForEach(dockManager.apps) { app in
-                    AppIconView(app: app)
+                if dockManager.isCollapsed {
+                    CollapsedDockView(isHidden: dockManager.isDockHidden)
+                        .onTapGesture {
+                            dockManager.toggleDockCollapse()
+                        }
+                } else {
+                    VStack(spacing: 8) {
+                        CollapseButtonView()
+                            .onTapGesture {
+                                dockManager.toggleDockCollapse()
+                            }
+                        
+                        MinimizeAllButtonView()
+                            .onTapGesture {
+                                dockManager.minimizeAllWindows()
+                            }
+                        
+                        ForEach(dockManager.apps) { app in
+                            AppIconView(app: app)
+                        }
+                    }
                 }
             }
             .padding(dynamicPadding)
@@ -1124,18 +1065,115 @@ public struct MultitaskDockSwiftView: View {
                 } else {
                     content.background(
                         RoundedRectangle(cornerRadius: 15)
-                            .fill(Color.black.opacity(0.7))
+                            .fill(Color.black.opacity(dockManager.isDockHidden ? 0.3 : 0.7))
                             .overlay(
                                 RoundedRectangle(cornerRadius: 15)
-                                    .stroke(Color.white.opacity(0.3), lineWidth: 1)
+                                    .stroke(Color.white.opacity(dockManager.isDockHidden ? 0.1 : 0.3), lineWidth: 1)
                             )
                     )
                 }
             }
             .scaleEffect(dockManager.isVisible ? 1.0 : 0.8)
+            .opacity(dockManager.isDockHidden ? (hideCollapsedDock && dockManager.isCollapsed ? 0.01 : 0.4) : 1.0)
+            .offset(dragOffset)
             .position(x: g.size.width / 2, y: g.size.height / 2)
         }
+
+
+
         .ignoresSafeArea()
+        .gesture(
+            DragGesture(minimumDistance: 5)
+            .onChanged { value in
+                self.isMoving = true
+                self.dragOffset = value.translation
+            }
+            .onEnded { value in
+                self.isMoving = true
+
+                let hcFrame = dockManager.hostingController?.view.frame ?? .zero
+                
+                let currentPhysicalFrame = hcFrame.offsetBy(dx: self.dragOffset.width, dy: self.dragOffset.height)
+                
+                if dockManager.isPositionChangeGesture(for: hcFrame, translation: value.translation) {
+                    let screenBounds = dockManager.keyWindow!.bounds
+                    let targetX = dockManager.calculateTargetX(isDockHidden: false, isOnRightSide: currentPhysicalFrame.midX > screenBounds.width / 2, dockWidth: dockManager.dockWidth, screenWidth: screenBounds.width)
+                    
+                    let safeAreaInsets = dockManager.safeAreaInsets
+                    let dockVerticalMargin = MultitaskDockManager.Constants.dockVerticalMargin
+                    let minY = safeAreaInsets.top + dockVerticalMargin
+                    let maxY = screenBounds.height - safeAreaInsets.bottom - currentPhysicalFrame.height - dockVerticalMargin
+                    let targetY = max(minY, min(maxY, currentPhysicalFrame.origin.y))
+                    
+                    let finalPhysicalPosition = CGPoint(x: targetX, y: targetY)
+                    
+                    let newOffset = CGSize(
+                        width: finalPhysicalPosition.x - hcFrame.origin.x,
+                        height: finalPhysicalPosition.y - hcFrame.origin.y
+                    )
+                    
+                    let animationDuration = MultitaskDockManager.Constants.longAnimationDuration
+                    
+                    withAnimation(.spring(response: animationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping)) {
+                        self.dragOffset = newOffset
+                    }
+                    
+                    DispatchQueue.main.asyncAfter(deadline: .now() + animationDuration) {
+                        dockManager.updateFrameAfterAnimation(finalOffset: newOffset)
+                        
+                        self.dragOffset = .zero
+                        
+                        self.isMoving = false
+                    }
+                    return
+                }
+                
+                if dockManager.handleSwipeToHideOrShowGesture(for: hcFrame, translation: value.translation) {
+                    withAnimation(.spring(response: MultitaskDockManager.Constants.longAnimationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping)) {
+                        self.dragOffset = .zero
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + MultitaskDockManager.Constants.longAnimationDuration) {
+                        self.isMoving = false
+                    }
+                    return
+                }
+                
+                let screenBounds = dockManager.keyWindow!.bounds
+                let safeAreaInsets = dockManager.safeAreaInsets
+                let dockVerticalMargin = MultitaskDockManager.Constants.dockVerticalMargin
+                let minY = safeAreaInsets.top + dockVerticalMargin
+                let maxY = screenBounds.height - safeAreaInsets.bottom - currentPhysicalFrame.height - dockVerticalMargin
+                let targetY = max(minY, min(maxY, currentPhysicalFrame.origin.y))
+                
+                let targetX: CGFloat
+
+                let isOnRightSide = hcFrame.origin.x > screenBounds.width / 2
+                targetX = dockManager.calculateTargetX(isDockHidden: dockManager.isDockHidden, isOnRightSide: isOnRightSide, dockWidth: currentPhysicalFrame.width, screenWidth: screenBounds.width)
+                
+                let finalPhysicalPosition = CGPoint(x: targetX, y: targetY)
+                
+                let newOffset = CGSize(
+                    width: finalPhysicalPosition.x - hcFrame.origin.x,
+                    height: finalPhysicalPosition.y - hcFrame.origin.y
+                )
+                
+                let animationDuration = MultitaskDockManager.Constants.longAnimationDuration
+                
+                withAnimation(.spring(response: animationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping)) {
+                    self.dragOffset = newOffset
+                }
+                
+                DispatchQueue.main.asyncAfter(deadline: .now() + animationDuration) {
+                    dockManager.updateFrameAfterAnimation(finalOffset: newOffset)
+                    
+                    self.dragOffset = .zero
+                    
+                    self.isMoving = false
+                }
+            }
+        )
+        .animation(.spring(response: MultitaskDockManager.Constants.standardAnimationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping), value: dockManager.isCollapsed)
+        .animation(.spring(response: MultitaskDockManager.Constants.standardAnimationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping), value: dockManager.isDockHidden)
         .animation(.spring(response: MultitaskDockManager.Constants.longAnimationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping), value: dockManager.dockWidth)
         .animation(.spring(response: MultitaskDockManager.Constants.longAnimationDuration, dampingFraction: MultitaskDockManager.Constants.standardSpringDamping), value: dockManager.settingsChanged)
     }
@@ -1263,6 +1301,12 @@ class IconCacheManager {
 @available(iOS 16.0, *)
 struct HomeBarSwiftView: View {
     @EnvironmentObject var dockManager: MultitaskDockManager
+    // Capsule length is user configurable (Settings > Multitasking).
+    @AppStorage("LCHomeBarLength", store: LCUtils.appGroupUserDefault) private var homeBarLength: Double = 88
+
+    private var barHeight: CGFloat {
+        homeBarLength > 0 ? CGFloat(homeBarLength) : MultitaskDockManager.Constants.defaultHomeBarLength
+    }
 
     var body: some View {
         ZStack(alignment: .trailing) {
@@ -1275,7 +1319,7 @@ struct HomeBarSwiftView: View {
                         .stroke(Color.black.opacity(0.25), lineWidth: 0.5)
                 )
                 .frame(width: MultitaskDockManager.Constants.homeBarVisualWidth,
-                       height: MultitaskDockManager.Constants.homeBarVisualHeight)
+                       height: barHeight)
                 .shadow(color: .black.opacity(0.35), radius: 2, x: 0, y: 1)
                 .padding(.trailing, 2)
         }
@@ -1289,8 +1333,6 @@ struct HomeBarSwiftView: View {
 struct AppIconView: View {
     let app: DockAppModel
     @State private var isPressed = false
-    @State private var isDragging = false
-    @State private var dragTranslation = CGSize.zero
     @State private var appIcon: UIImage?
     @State private var isLoading = true
     @EnvironmentObject var dockManager: MultitaskDockManager
@@ -1314,61 +1356,23 @@ struct AppIconView: View {
         .frame(width: iconSize, height: iconSize)
         .shadow(color: .black.opacity(0.3), radius: 4, x: 0, y: 3)
         .scaleEffect(isPressed ? 1.15 : 1.0)
-        .offset(dragTranslation)
-        .opacity(isDragging ? 0.6 : 1.0)
         .animation(.easeInOut(duration: 0.1), value: isPressed)
-        .animation(.easeInOut(duration: 0.1), value: isDragging)
         .animation(.easeInOut(duration: MultitaskDockManager.Constants.standardAnimationDuration), value: dockManager.settingsChanged)
         .onAppear {
             loadAppIcon()
         }
-        .gesture(
-            DragGesture(minimumDistance: 0, coordinateSpace: .global)
-                .onChanged { value in
-                    if !isPressed {
-                        isPressed = true
-                    }
-                    // Dragging an icon outside the dock window closes the app
-                    let moved = max(abs(value.translation.width), abs(value.translation.height))
-                    if moved > 6 {
-                        isDragging = true
-                        dragTranslation = value.translation
-                    }
-                }
-                .onEnded { value in
-                    isPressed = false
-                    let wasDragging = isDragging
-                    isDragging = false
-                    dragTranslation = .zero
-
-                    if wasDragging {
-                        if shouldTerminate(with: value.translation) {
-                            UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
-                            dockManager.terminateApp(app.appUUID)
-                        }
-                    } else {
-                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                        let _ = dockManager.bringMultitaskViewToFront(uuid: app.appUUID, from: value.startLocation)
-                        dockManager.hideDock()
-                    }
-                }
+        .onPressGesture(
+            onPress: { 
+                isPressed = true
+            },
+            onRelease: { location in 
+                isPressed = false
+                let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
+                impactFeedback.impactOccurred()
+                let _ = dockManager.bringMultitaskViewToFront(uuid: app.appUUID, from: location)
+            }
         )
         .contentShape(Rectangle())
-    }
-
-    private func shouldTerminate(with translation: CGSize) -> Bool {
-        // The dock hugs the right edge, so an icon is considered dragged out once it
-        // travels clearly left past the panel, or up/down beyond the panel bounds.
-        // Using the drag translation avoids SwiftUI/UIKit coordinate-space mismatches.
-        let panelSize = dockManager.hostingController?.view.bounds.size ?? CGSize.zero
-        let dockWidth = panelSize.width > 0 ? panelSize.width : dockManager.dockWidth
-        let iconSize = dockManager.adaptiveIconSize
-
-        let leftwardDistance = -translation.width
-        let horizontalThreshold = max(iconSize * 0.5, dockWidth * 0.5, 24)
-        let verticalThreshold = max(panelSize.height * 0.5, iconSize)
-
-        return leftwardDistance > horizontalThreshold || abs(translation.height) > verticalThreshold
     }
     
     private func loadAppIcon() {
@@ -1445,13 +1449,11 @@ struct LoadingIconView: View {
 enum HomeBarGuestBridge {
     static let notificationPrefix = "com.eupdon.livecontainer.homebar."
     static let beginSuffix = "begin"
-    static let holdSuffix = "hold"
-    static let dockSuffix = "dock"
     static let homeSuffix = "home"
     static let endSuffix = "end"
     static let cancelSuffix = "cancel"
 
-    static let allSuffixes = [beginSuffix, holdSuffix, dockSuffix, homeSuffix, endSuffix, cancelSuffix]
+    static let allSuffixes = [beginSuffix, homeSuffix, endSuffix, cancelSuffix]
 
     private static var installed = false
 
