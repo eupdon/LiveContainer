@@ -21970,6 +21970,23 @@
         }
       }
     },
+    "lc.settings.homeBarLength" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Home Bar Length"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "홈바 길이"
+          }
+        }
+      }
+    },
     "lc.settings.importCertFromBuiltinSideStore" : {
       "extractionState" : "stale",
       "localizations" : {
