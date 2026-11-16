@@ -16,7 +16,7 @@ struct LCMultitaskSettingView: View {
     @AppStorage("LCSkipTerminatedScreen", store: LCUtils.appGroupUserDefault) var skipTerminatedScreen = false
     @AppStorage("LCRestartTerminatedApp", store: LCUtils.appGroupUserDefault) var restartTerminatedApp = false
     @AppStorage("LCMaxOneAppOnStage", store: LCUtils.appGroupUserDefault) var onlyOneAppOnStage = false
-    @AppStorage("LCDockWidth", store: LCUtils.appGroupUserDefault) var dockWidth: Double = 80
+    @AppStorage("LCHomeBarLength", store: LCUtils.appGroupUserDefault) var homeBarLength: Double = 88
     @AppStorage("LCHideCollapsedDock", store: LCUtils.appGroupUserDefault) var hideCollapsedDock: Bool = false
     @AppStorage("LCRedirectURLToHost", store: LCUtils.appGroupUserDefault) var redirectURLToHost = false
     
@@ -68,15 +68,15 @@ struct LCMultitaskSettingView: View {
             Section {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
-                        Text("lc.settings.dockWidth".loc)
+                        Text("lc.settings.homeBarLength".loc)
                             .foregroundColor(.primary)
                         Spacer()
-                        Text("\(Int(dockWidth))px")
+                        Text("\(Int(homeBarLength))pt")
                             .foregroundColor(.secondary)
                             .font(.caption)
                     }
-                    Slider(value: $dockWidth, in: 20...120) {
-                        Text("lc.settings.dockWidth".loc)
+                    Slider(value: $homeBarLength, in: 60...200, step: 4) {
+                        Text("lc.settings.homeBarLength".loc)
                     }
                     .tint(.accentColor)
                 }
