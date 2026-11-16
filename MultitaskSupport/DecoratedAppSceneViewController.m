@@ -507,7 +507,7 @@
     [self.view layoutIfNeeded];
     [UIView animateWithDuration:0.3 animations:^{
         BOOL bottomWindowBar = [NSUserDefaults.lcSharedDefaults boolForKey:@"LCMultitaskBottomWindowBar"];
-        BOOL hideWindowBar = self.immersiveMode || (MultitaskDockManager.shared.isCollapsed && self.isMaximized);
+        BOOL hideWindowBar = self.immersiveMode;
         CGFloat navBarHeight = hideWindowBar ? 0 : 44;
         self.navigationBar.alpha = hideWindowBar ? 0 : 1;
         self.navigationBar.hidden = hideWindowBar;
