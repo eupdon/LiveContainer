@@ -344,11 +344,8 @@
         [dock removeRunningApp:self.dataUUID];
         
         self.view.layer.masksToBounds = NO;
-        [UIView transitionWithView:self.view duration:0.4 options:UIViewAnimationOptionTransitionCurlUp animations:^{
-            self.view.hidden = YES;
-        } completion:^(BOOL b){
-            [self.view removeFromSuperview];
-        }];
+        self.view.hidden = YES;
+        [self.view removeFromSuperview];
         
         if(skipTerminationScreen) {
             [MultitaskRelaunchManager scheduleRelaunchIfNeededWithBundleId:self.appSceneVC.bundleId dataUUID:self.dataUUID isManualTermination:isManual];
