@@ -1669,23 +1669,20 @@ struct LCBottomDock: View {
     }
 
     private var dockBar: some View {
-        ZStack(alignment: .bottom) {
-            pagesStrip
-                .padding(.bottom, verticalPadding)
-        }
-        .frame(width: barWidth, height: barHeight)
-        .modifier { content in
-            if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
-                content.glassEffect(.regular, in: Capsule(style: .continuous))
-            } else {
-                content
-                    .background(Capsule(style: .continuous).fill(.ultraThinMaterial))
-                    .overlay(
-                        Capsule(style: .continuous)
-                            .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
-                    )
+        pagesStrip
+            .frame(width: barWidth, height: barHeight)
+            .modifier { content in
+                if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+                    content.glassEffect(.regular, in: Capsule(style: .continuous))
+                } else {
+                    content
+                        .background(Capsule(style: .continuous).fill(.ultraThinMaterial))
+                        .overlay(
+                            Capsule(style: .continuous)
+                                .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+                        )
+                }
             }
-        }
         .contentShape(Capsule(style: .continuous))
         .gesture(dockDragGesture)
         .overlay(alignment: .topLeading) {
@@ -1734,6 +1731,7 @@ struct LCBottomDock: View {
             LCBottomDockIcon(app: app,
                              iconSize: iconSize,
                              onTap: { returnToApp(app) })
+                .id(app.appUUID)
                 .frame(width: slotWidth, height: iconSize)
                 .opacity(liftedAppUUID == app.appUUID ? 0 : 1)
                 .allowsHitTesting(liftedAppUUID != app.appUUID)
@@ -1750,6 +1748,7 @@ struct LCBottomDock: View {
         if let uuid = liftedAppUUID,
            let app = dockManager.apps.first(where: { $0.appUUID == uuid }) {
             LCBottomDockIcon(app: app, iconSize: iconSize, onTap: {})
+                .id(app.appUUID)
                 .frame(width: iconSize, height: iconSize)
                 .shadow(color: .black.opacity(0.25), radius: 6, x: 0, y: 3)
                 .position(x: barPadding + centeredInset + (CGFloat(liftSlot) + 0.5) * slotWidth,
@@ -1871,6 +1870,10 @@ private struct LCBottomDockIcon: View {
     @State private var appIcon: UIImage?
     @State private var isLoading: Bool
 
+    private var cacheKey: String {
+        "\(app.appName)_\(app.appUUID)"
+    }
+
     private var cornerRadius: CGFloat {
         iconSize * 0.225
     }
@@ -1906,27 +1909,34 @@ private struct LCBottomDockIcon: View {
             onTap()
         }
         .accessibilityLabel(Text(app.appName))
-        .onAppear(perform: loadIcon)
+        // Runs on appear and every time another app takes this slot, so the
+        // icon can never show the app that used to sit here.
+        .task(id: cacheKey) {
+            loadIcon()
+        }
     }
 
     private func loadIcon() {
-        guard appIcon == nil else { return }
+        let key = cacheKey
 
-        let cacheKey = "\(app.appName)_\(app.appUUID)"
-
-        if let cachedIcon = IconCacheManager.shared.getIcon(for: cacheKey) {
+        if let cachedIcon = IconCacheManager.shared.getIcon(for: key) {
             appIcon = cachedIcon
             isLoading = false
             return
         }
 
+        appIcon = nil
+        isLoading = true
+
         let dark = darkModeIcon
+        let target = app
+
         DispatchQueue.global(qos: .userInitiated).async {
             var finalIcon: UIImage?
 
-            if let appInfo = self.app.appInfo {
+            if let appInfo = target.appInfo {
                 finalIcon = appInfo.iconIsDarkIcon(dark)
-            } else if let foundAppInfo = AppInfoProvider.shared.findAppInfo(appName: self.app.appName, dataUUID: self.app.appUUID) {
+            } else if let foundAppInfo = AppInfoProvider.shared.findAppInfo(appName: target.appName, dataUUID: target.appUUID) {
                 finalIcon = foundAppInfo.iconIsDarkIcon(dark)
             }
 
@@ -1934,7 +1944,7 @@ private struct LCBottomDockIcon: View {
                 self.isLoading = false
                 if let icon = finalIcon {
                     self.appIcon = icon
-                    IconCacheManager.shared.setIcon(icon, for: cacheKey)
+                    IconCacheManager.shared.setIcon(icon, for: key)
                 }
             }
         }
