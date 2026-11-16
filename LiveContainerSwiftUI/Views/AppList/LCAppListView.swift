@@ -92,6 +92,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @State private var uninstallAlertShow = false
     
     @State private var isViewAppeared = false
+
+    // Bottom dock for running multitask apps: it hides while the list is
+    // scrolled down, and the reserved inset stays so nothing jumps.
+    @State private var isBottomDockVisible = true
+    @State private var bottomDockReferenceOffset: CGFloat = 0
     
     @ObservedObject var searchContext: SearchContext
     var sortedApps: [LCAppModel] {
@@ -128,6 +133,49 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 
     private var showEmptyState: Bool {
         return filteredApps.isEmpty && sharedModel.hiddenApps.isEmpty && searchContext.debouncedQuery.isEmpty
+    }
+
+    private var isSearching: Bool {
+        return !searchContext.debouncedQuery.isEmpty || searchContext.isTyping
+    }
+
+    /// The bottom dock only exists in virtual-window multitask mode and never
+    /// while searching. Whether it actually has icons and takes up space is
+    /// decided by `LCBottomDock` itself, which observes the dock manager.
+    private var shouldShowBottomDock: Bool {
+        return multitaskMode == .virtualWindow && !isSearching
+    }
+
+    private func updateBottomDockVisibility(for offset: CGFloat) {
+        // Near the top the dock is always visible.
+        guard offset <= -4 else {
+            bottomDockReferenceOffset = offset
+            setBottomDockVisible(true)
+            return
+        }
+        if offset < bottomDockReferenceOffset - 12 {
+            bottomDockReferenceOffset = offset
+            setBottomDockVisible(false)
+        } else if offset > bottomDockReferenceOffset + 12 {
+            bottomDockReferenceOffset = offset
+            setBottomDockVisible(true)
+        }
+    }
+
+    private func setBottomDockVisible(_ visible: Bool) {
+        guard isBottomDockVisible != visible else { return }
+        withAnimation(.easeInOut(duration: 0.2)) {
+            isBottomDockVisible = visible
+        }
+    }
+
+    @ViewBuilder
+    private var bottomDockInset: some View {
+        if #available(iOS 16.0, *) {
+            if shouldShowBottomDock {
+                LCBottomDock(isCollapsed: !isBottomDockVisible)
+            }
+        }
     }
 
     private var gridColumns: [GridItem] {
@@ -270,7 +318,14 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         EmptyView()
                 })
                 .hidden()
-                
+
+                // Tracks the list offset so the bottom dock can hide on scroll down.
+                GeometryReader { proxy in
+                    Color.clear.preference(key: LCAppListScrollOffsetKey.self,
+                                           value: proxy.frame(in: .named("scroll")).minY)
+                }
+                .frame(height: 0)
+
                 if showEmptyState {
                     emptyStateView
                 } else {
@@ -331,6 +386,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
             .navigationBarProgressBar(show:$installprogressVisible, progress: $installProgressPercentage)
             .coordinateSpace(name: "scroll")
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                bottomDockInset
+            }
+            .onPreferenceChange(LCAppListScrollOffsetKey.self) { offset in
+                updateBottomDockVisibility(for: offset)
+            }
             .onAppear {
                 if !didAppear {
                     onAppear()
@@ -1495,3 +1556,193 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
 extension View {
     func apply<V: View>(@ViewBuilder _ block: (Self) -> V) -> V { block(self) }
 }
+
+// MARK: - Bottom Dock
+
+private struct LCAppListScrollOffsetKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+/// Bottom dock of the app list. It shows the apps that are currently running in
+/// multitask mode (minimized ones included), exactly four icons per screen, and
+/// scrolls horizontally when there are more.
+@available(iOS 16.0, *)
+struct LCBottomDock: View {
+    @ObservedObject private var dockManager = MultitaskDockManager.shared
+    /// Set while the list is scrolled down. The inset is kept either way, so the
+    /// list never jumps when the dock hides.
+    var isCollapsed: Bool = false
+
+    @State private var measuredWidth: CGFloat = UIScreen.main.bounds.width
+
+    private let visibleSlotCount: CGFloat = 4
+    private let iconSpacing: CGFloat = 14
+    private let horizontalPadding: CGFloat = 16
+    private let verticalPadding: CGFloat = 10
+    private let maxIconSize: CGFloat = 62
+    private let minIconSize: CGFloat = 26
+
+    private var iconSize: CGFloat {
+        let slot = (max(measuredWidth, 320) - horizontalPadding * 2) / visibleSlotCount
+        return min(maxIconSize, max(minIconSize, slot - iconSpacing))
+    }
+
+    var body: some View {
+        if dockManager.apps.isEmpty {
+            EmptyView()
+        } else {
+            dockRow
+        }
+    }
+
+    private var dockRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: iconSpacing) {
+                ForEach(dockManager.apps) { app in
+                    LCBottomDockIcon(app: app,
+                                     iconSize: iconSize,
+                                     onTap: { returnToApp(app) },
+                                     onTerminate: { terminate(app) })
+                }
+            }
+            .padding(.horizontal, horizontalPadding)
+            .frame(minWidth: measuredWidth, alignment: .center)
+            .frame(height: iconSize)
+        }
+        .frame(height: iconSize)
+        .padding(.vertical, verticalPadding)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: (iconSize + verticalPadding * 2) / 2, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: (iconSize + verticalPadding * 2) / 2, style: .continuous)
+                        .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+                )
+        )
+        .padding(.horizontal, 12)
+        .padding(.bottom, 6)
+        .background(
+            GeometryReader { proxy in
+                Color.clear
+                    .onAppear { measuredWidth = proxy.size.width }
+                    .onChange(of: proxy.size.width) { newWidth in
+                        measuredWidth = newWidth
+                    }
+            }
+        )
+        .opacity(isCollapsed ? 0 : 1)
+        .offset(y: isCollapsed ? iconSize + verticalPadding * 2 + 6 : 0)
+        .allowsHitTesting(!isCollapsed)
+        .animation(.easeInOut(duration: 0.2), value: isCollapsed)
+    }
+
+    private func returnToApp(_ app: DockAppModel) {
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        let _ = dockManager.bringMultitaskViewToFront(uuid: app.appUUID)
+    }
+
+    private func terminate(_ app: DockAppModel) {
+        dockManager.terminateApp(app.appUUID)
+    }
+}
+
+/// One icon of the bottom dock. Tapping it returns to that app; dragging it up
+/// and out of the dock terminates the app.
+@available(iOS 16.0, *)
+private struct LCBottomDockIcon: View {
+    let app: DockAppModel
+    let iconSize: CGFloat
+    var onTap: () -> Void
+    var onTerminate: () -> Void
+
+    @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) private var darkModeIcon = false
+    @State private var appIcon: UIImage?
+    @State private var isLoading = true
+    @State private var isDragging = false
+    @State private var dragOffset: CGSize = .zero
+
+    private let terminateDistance: CGFloat = 60
+
+    var body: some View {
+        Group {
+            if isLoading && appIcon == nil {
+                RoundedRectangle(cornerRadius: iconSize * 0.24, style: .continuous)
+                    .fill(Color.gray.opacity(0.25))
+                    .overlay(ProgressView().scaleEffect(0.7))
+            } else if let icon = appIcon {
+                Image(uiImage: icon)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+            } else {
+                RoundedRectangle(cornerRadius: iconSize * 0.24, style: .continuous)
+                    .fill(Color.gray.opacity(0.3))
+            }
+        }
+        .frame(width: iconSize, height: iconSize)
+        .scaleEffect(isDragging ? 1.12 : 1)
+        .offset(y: isDragging ? max(dragOffset.height, -terminateDistance * 2) : 0)
+        .opacity(isDragging ? 0.7 : 1)
+        .animation(.easeOut(duration: 0.15), value: isDragging)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard !isDragging else { return }
+            onTap()
+        }
+        .simultaneousGesture(dragGesture)
+        .accessibilityLabel(Text(app.appName))
+        .onAppear(perform: loadIcon)
+    }
+
+    private var dragGesture: some Gesture {
+        DragGesture(minimumDistance: 8)
+            .onChanged { value in
+                // Upward drags are for terminating; horizontal ones belong to the
+                // dock's own scrolling.
+                guard value.translation.height < 0,
+                      abs(value.translation.height) > abs(value.translation.width) else { return }
+                isDragging = true
+                dragOffset = value.translation
+            }
+            .onEnded { value in
+                let wasDragging = isDragging
+                isDragging = false
+                dragOffset = .zero
+                guard wasDragging, value.translation.height <= -terminateDistance else { return }
+                UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+                onTerminate()
+            }
+    }
+
+    private func loadIcon() {
+        let cacheKey = "\(app.appName)_\(app.appUUID)"
+
+        if let cachedIcon = IconCacheManager.shared.getIcon(for: cacheKey) {
+            appIcon = cachedIcon
+            isLoading = false
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            var finalIcon: UIImage?
+
+            if let appInfo = app.appInfo {
+                finalIcon = appInfo.iconIsDarkIcon(darkModeIcon)
+            } else if let foundAppInfo = AppInfoProvider.shared.findAppInfo(appName: app.appName, dataUUID: app.appUUID) {
+                finalIcon = foundAppInfo.iconIsDarkIcon(darkModeIcon)
+            }
+
+            DispatchQueue.main.async {
+                isLoading = false
+                if let icon = finalIcon {
+                    appIcon = icon
+                    IconCacheManager.shared.setIcon(icon, for: cacheKey)
+                }
+            }
+        }
+    }
+}
+
