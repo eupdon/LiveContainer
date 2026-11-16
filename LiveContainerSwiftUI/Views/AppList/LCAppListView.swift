@@ -1567,110 +1567,327 @@ private struct LCAppListScrollOffsetKey: PreferenceKey {
 }
 
 /// Bottom dock of the app list. It shows the apps that are currently running in
-/// multitask mode (minimized ones included), exactly four icons per screen, and
-/// scrolls horizontally when there are more.
+/// multitask mode (minimized ones included), four icons per page.
+///
+/// Paging is driven by a plain drag gesture instead of a `ScrollView`: the icons
+/// also need a vertical drag to terminate an app, and a per-icon drag gesture
+/// would fight with the scroll view's pan. Only the current page's icons sit in
+/// the clipped strip, so no icon can ever be drawn outside the bar.
 @available(iOS 16.0, *)
 struct LCBottomDock: View {
     @ObservedObject private var dockManager = MultitaskDockManager.shared
+
     /// Set while the list is scrolled down. The inset is kept either way, so the
     /// list never jumps when the dock hides.
     var isCollapsed: Bool = false
 
-    @State private var measuredWidth: CGFloat = UIScreen.main.bounds.width
+    @State private var availableWidth: CGFloat = UIScreen.main.bounds.width
+    @State private var page: Int = 0
+    @State private var dragAxis: Axis?
+    @State private var horizontalDrag: CGFloat = 0
+    @State private var liftedAppUUID: String?
+    @State private var liftOffset: CGFloat = 0
+    @State private var liftSlot: Int = 0
 
-    private let visibleSlotCount: CGFloat = 4
-    private let iconSpacing: CGFloat = 14
-    private let horizontalPadding: CGFloat = 16
-    private let verticalPadding: CGFloat = 10
-    private let maxIconSize: CGFloat = 62
-    private let minIconSize: CGFloat = 26
+    init(isCollapsed: Bool = false) {
+        self.isCollapsed = isCollapsed
+    }
+
+    private let iconsPerPage = 4
+    private let outerPadding: CGFloat = 12
+    private let barPadding: CGFloat = 16
+    private let verticalPadding: CGFloat = 12
+    private let maxBarWidth: CGFloat = 560
+    private let maxIconSize: CGFloat = 58
+    private let dragThreshold: CGFloat = 12
+    private let terminateDistance: CGFloat = 60
+
+    private var barWidth: CGFloat {
+        min(max(availableWidth - outerPadding * 2, 160), maxBarWidth)
+    }
+
+    private var contentWidth: CGFloat {
+        max(barWidth - barPadding * 2, 1)
+    }
+
+    private var slotWidth: CGFloat {
+        contentWidth / CGFloat(iconsPerPage)
+    }
 
     private var iconSize: CGFloat {
-        let slot = (max(measuredWidth, 320) - horizontalPadding * 2) / visibleSlotCount
-        return min(maxIconSize, max(minIconSize, slot - iconSpacing))
+        min(maxIconSize, max(20, slotWidth - 12))
+    }
+
+    private var pageCount: Int {
+        max(1, (dockManager.apps.count + iconsPerPage - 1) / iconsPerPage)
+    }
+
+    /// `page` is only corrected after the body has been rebuilt, so rendering
+    /// and hit testing always use the clamped value to avoid an empty frame
+    /// when an app is removed from the last page.
+    private var effectivePage: Int {
+        min(max(page, 0), max(pageCount - 1, 0))
+    }
+
+    /// With a single page and fewer than four apps the unused slots would leave
+    /// the icons hugging the left edge. Shifting the strip by half of the empty
+    /// space keeps them exactly in the middle of the bar.
+    private var centeredInset: CGFloat {
+        guard pageCount == 1 else { return 0 }
+        let emptySlots = iconsPerPage - min(dockManager.apps.count, iconsPerPage)
+        return CGFloat(emptySlots) * slotWidth / 2
+    }
+
+    private var barHeight: CGFloat {
+        iconSize + verticalPadding * 2
+    }
+
+    private var pageIndices: [Int] {
+        Array(0..<pageCount)
     }
 
     var body: some View {
         if dockManager.apps.isEmpty {
             EmptyView()
         } else {
-            dockRow
+            dockBar
+                .onChange(of: pageCount) { newCount in
+                    let clamped = min(page, max(newCount - 1, 0))
+                    if clamped != page {
+                        page = clamped
+                    }
+                }
+                .onChange(of: dockManager.apps.count) { _ in
+                    resetTransientState()
+                }
+                .onChange(of: isCollapsed) { collapsed in
+                    if collapsed {
+                        resetTransientState()
+                    }
+                }
         }
     }
 
-    private var dockRow: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: iconSpacing) {
-                ForEach(dockManager.apps) { app in
-                    LCBottomDockIcon(app: app,
-                                     iconSize: iconSize,
-                                     onTap: { returnToApp(app) },
-                                     onTerminate: { terminate(app) })
-                }
-            }
-            .padding(.horizontal, horizontalPadding)
-            .frame(minWidth: measuredWidth, alignment: .center)
-            .frame(height: iconSize)
+    private var dockBar: some View {
+        ZStack(alignment: .bottom) {
+            pagesStrip
+                .padding(.bottom, verticalPadding)
         }
-        .frame(height: iconSize)
-        .padding(.vertical, verticalPadding)
+        .frame(width: barWidth, height: barHeight)
+        .modifier { content in
+            if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
+                content.glassEffect(.regular, in: Capsule(style: .continuous))
+            } else {
+                content
+                    .background(Capsule(style: .continuous).fill(.ultraThinMaterial))
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+                    )
+            }
+        }
+        .contentShape(Capsule(style: .continuous))
+        .gesture(dockDragGesture)
+        .overlay(alignment: .topLeading) {
+            liftedIconOverlay
+        }
         .frame(maxWidth: .infinity)
-        .background(
-            RoundedRectangle(cornerRadius: (iconSize + verticalPadding * 2) / 2, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: (iconSize + verticalPadding * 2) / 2, style: .continuous)
-                        .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
-                )
-        )
-        .padding(.horizontal, 12)
         .padding(.bottom, 6)
+        .opacity(isCollapsed ? 0 : 1)
+        .offset(y: isCollapsed ? barHeight + 6 : 0)
+        .allowsHitTesting(!isCollapsed)
+        .animation(.easeInOut(duration: 0.2), value: isCollapsed)
         .background(
             GeometryReader { proxy in
                 Color.clear
-                    .onAppear { measuredWidth = proxy.size.width }
+                    .onAppear { availableWidth = proxy.size.width }
                     .onChange(of: proxy.size.width) { newWidth in
-                        measuredWidth = newWidth
+                        availableWidth = newWidth
                     }
             }
         )
-        .opacity(isCollapsed ? 0 : 1)
-        .offset(y: isCollapsed ? iconSize + verticalPadding * 2 + 6 : 0)
-        .allowsHitTesting(!isCollapsed)
-        .animation(.easeInOut(duration: 0.2), value: isCollapsed)
+    }
+
+    /// The four fixed slots of every page are laid out edge to edge, so the icons
+    /// are exactly centered no matter how many apps are running.
+    private var pagesStrip: some View {
+        HStack(spacing: 0) {
+            ForEach(pageIndices, id: \.self) { pageIndex in
+                HStack(spacing: 0) {
+                    ForEach(0..<iconsPerPage, id: \.self) { slot in
+                        slotView(pageIndex: pageIndex, slot: slot)
+                    }
+                }
+                .frame(width: contentWidth, height: iconSize)
+            }
+        }
+        .offset(x: -CGFloat(effectivePage) * contentWidth + horizontalDrag + centeredInset)
+        .frame(width: contentWidth, height: iconSize, alignment: .leading)
+        .clipped()
+    }
+
+    @ViewBuilder
+    private func slotView(pageIndex: Int, slot: Int) -> some View {
+        let appIndex = pageIndex * iconsPerPage + slot
+        if appIndex < dockManager.apps.count {
+            let app = dockManager.apps[appIndex]
+            LCBottomDockIcon(app: app,
+                             iconSize: iconSize,
+                             onTap: { returnToApp(app) })
+                .frame(width: slotWidth, height: iconSize)
+                .opacity(liftedAppUUID == app.appUUID ? 0 : 1)
+                .allowsHitTesting(liftedAppUUID != app.appUUID)
+        } else {
+            Color.clear
+                .frame(width: slotWidth, height: iconSize)
+        }
+    }
+
+    /// Only the icon being dragged is drawn here. It lives outside the clipped
+    /// strip so it can be lifted above the bar.
+    @ViewBuilder
+    private var liftedIconOverlay: some View {
+        if let uuid = liftedAppUUID,
+           let app = dockManager.apps.first(where: { $0.appUUID == uuid }) {
+            LCBottomDockIcon(app: app, iconSize: iconSize, onTap: {})
+                .frame(width: iconSize, height: iconSize)
+                .shadow(color: .black.opacity(0.25), radius: 6, x: 0, y: 3)
+                .position(x: barPadding + centeredInset + (CGFloat(liftSlot) + 0.5) * slotWidth,
+                          y: verticalPadding + iconSize / 2 + liftOffset)
+                .allowsHitTesting(false)
+        }
+    }
+
+    private var dockDragGesture: some Gesture {
+        DragGesture(minimumDistance: dragThreshold)
+            .onChanged { value in
+                if dragAxis == nil {
+                    if abs(value.translation.width) > abs(value.translation.height) {
+                        dragAxis = .horizontal
+                    } else {
+                        dragAxis = .vertical
+                        beginLift(at: value.startLocation)
+                    }
+                }
+                switch dragAxis {
+                case .some(.horizontal):
+                    horizontalDrag = rubberBanded(horizontal: value.translation.width)
+                case .some(.vertical):
+                    guard liftedAppUUID != nil else { return }
+                    liftOffset = max(-160, min(0, value.translation.height))
+                case .none:
+                    break
+                }
+            }
+            .onEnded { value in
+                let axis = dragAxis
+                dragAxis = nil
+                switch axis {
+                case .some(.horizontal):
+                    finishPageDrag(translation: value.translation.width,
+                                   predicted: value.predictedEndTranslation.width)
+                case .some(.vertical):
+                    finishLift(translation: value.translation.height)
+                case .none:
+                    break
+                }
+            }
+    }
+
+    private func rubberBanded(horizontal translation: CGFloat) -> CGFloat {
+        if (page <= 0 && translation > 0) || (page >= pageCount - 1 && translation < 0) {
+            return translation * 0.25
+        }
+        return translation
+    }
+
+    private func finishPageDrag(translation: CGFloat, predicted: CGFloat) {
+        var target = effectivePage
+        if translation < -contentWidth * 0.2 || predicted < -contentWidth * 0.5 {
+            target += 1
+        } else if translation > contentWidth * 0.2 || predicted > contentWidth * 0.5 {
+            target -= 1
+        }
+        let clamped = min(max(target, 0), max(pageCount - 1, 0))
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+            page = clamped
+            horizontalDrag = 0
+        }
+    }
+
+    private func beginLift(at location: CGPoint) {
+        let x = location.x - barPadding - centeredInset
+        guard x >= 0, x < contentWidth else { return }
+        let slot = Int(x / slotWidth)
+        guard slot >= 0, slot < iconsPerPage else { return }
+        let index = effectivePage * iconsPerPage + slot
+        guard index < dockManager.apps.count else { return }
+        liftSlot = slot
+        liftedAppUUID = dockManager.apps[index].appUUID
+        liftOffset = 0
+    }
+
+    private func finishLift(translation: CGFloat) {
+        guard let uuid = liftedAppUUID else { return }
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            liftOffset = 0
+        }
+        if translation <= -terminateDistance {
+            UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+            dockManager.terminateApp(uuid)
+            liftedAppUUID = nil
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                if self.liftedAppUUID == uuid {
+                    self.liftedAppUUID = nil
+                }
+            }
+        }
+    }
+
+    private func resetTransientState() {
+        dragAxis = nil
+        horizontalDrag = 0
+        liftedAppUUID = nil
+        liftOffset = 0
     }
 
     private func returnToApp(_ app: DockAppModel) {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         let _ = dockManager.bringMultitaskViewToFront(uuid: app.appUUID)
     }
-
-    private func terminate(_ app: DockAppModel) {
-        dockManager.terminateApp(app.appUUID)
-    }
 }
 
-/// One icon of the bottom dock. Tapping it returns to that app; dragging it up
-/// and out of the dock terminates the app.
+/// One icon of the bottom dock. Tapping it returns to that app. The lift and
+/// terminate gesture lives on `LCBottomDock` itself, so the icon stays a plain
+/// view and the paging gesture has nothing to compete with.
 @available(iOS 16.0, *)
 private struct LCBottomDockIcon: View {
     let app: DockAppModel
     let iconSize: CGFloat
     var onTap: () -> Void
-    var onTerminate: () -> Void
 
     @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) private var darkModeIcon = false
     @State private var appIcon: UIImage?
-    @State private var isLoading = true
-    @State private var isDragging = false
-    @State private var dragOffset: CGSize = .zero
+    @State private var isLoading: Bool
 
-    private let terminateDistance: CGFloat = 60
+    private var cornerRadius: CGFloat {
+        iconSize * 0.225
+    }
+
+    init(app: DockAppModel, iconSize: CGFloat, onTap: @escaping () -> Void) {
+        self.app = app
+        self.iconSize = iconSize
+        self.onTap = onTap
+        let cached = IconCacheManager.shared.getIcon(for: "\(app.appName)_\(app.appUUID)")
+        _appIcon = State(initialValue: cached)
+        _isLoading = State(initialValue: cached == nil)
+    }
 
     var body: some View {
         Group {
             if isLoading && appIcon == nil {
-                RoundedRectangle(cornerRadius: iconSize * 0.24, style: .continuous)
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(Color.gray.opacity(0.25))
                     .overlay(ProgressView().scaleEffect(0.7))
             } else if let icon = appIcon {
@@ -1678,46 +1895,23 @@ private struct LCBottomDockIcon: View {
                     .resizable()
                     .aspectRatio(contentMode: .fit)
             } else {
-                RoundedRectangle(cornerRadius: iconSize * 0.24, style: .continuous)
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(Color.gray.opacity(0.3))
             }
         }
         .frame(width: iconSize, height: iconSize)
-        .scaleEffect(isDragging ? 1.12 : 1)
-        .offset(y: isDragging ? max(dragOffset.height, -terminateDistance * 2) : 0)
-        .opacity(isDragging ? 0.7 : 1)
-        .animation(.easeOut(duration: 0.15), value: isDragging)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture {
-            guard !isDragging else { return }
             onTap()
         }
-        .simultaneousGesture(dragGesture)
         .accessibilityLabel(Text(app.appName))
         .onAppear(perform: loadIcon)
     }
 
-    private var dragGesture: some Gesture {
-        DragGesture(minimumDistance: 8)
-            .onChanged { value in
-                // Upward drags are for terminating; horizontal ones belong to the
-                // dock's own scrolling.
-                guard value.translation.height < 0,
-                      abs(value.translation.height) > abs(value.translation.width) else { return }
-                isDragging = true
-                dragOffset = value.translation
-            }
-            .onEnded { value in
-                let wasDragging = isDragging
-                isDragging = false
-                dragOffset = .zero
-                guard wasDragging, value.translation.height <= -terminateDistance else { return }
-                UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
-                onTerminate()
-            }
-    }
-
     private func loadIcon() {
+        guard appIcon == nil else { return }
+
         let cacheKey = "\(app.appName)_\(app.appUUID)"
 
         if let cachedIcon = IconCacheManager.shared.getIcon(for: cacheKey) {
@@ -1726,23 +1920,23 @@ private struct LCBottomDockIcon: View {
             return
         }
 
+        let dark = darkModeIcon
         DispatchQueue.global(qos: .userInitiated).async {
             var finalIcon: UIImage?
 
-            if let appInfo = app.appInfo {
-                finalIcon = appInfo.iconIsDarkIcon(darkModeIcon)
-            } else if let foundAppInfo = AppInfoProvider.shared.findAppInfo(appName: app.appName, dataUUID: app.appUUID) {
-                finalIcon = foundAppInfo.iconIsDarkIcon(darkModeIcon)
+            if let appInfo = self.app.appInfo {
+                finalIcon = appInfo.iconIsDarkIcon(dark)
+            } else if let foundAppInfo = AppInfoProvider.shared.findAppInfo(appName: self.app.appName, dataUUID: self.app.appUUID) {
+                finalIcon = foundAppInfo.iconIsDarkIcon(dark)
             }
 
             DispatchQueue.main.async {
-                isLoading = false
+                self.isLoading = false
                 if let icon = finalIcon {
-                    appIcon = icon
+                    self.appIcon = icon
                     IconCacheManager.shared.setIcon(icon, for: cacheKey)
                 }
             }
         }
     }
 }
-
