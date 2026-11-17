@@ -1588,6 +1588,11 @@ struct LCBottomDock: View {
     @State private var liftedAppUUID: String?
     @State private var liftOffset: CGFloat = 0
     @State private var liftSlot: Int = 0
+    @State private var isDismissingIcon = false
+    // Snapshot of the terminating app so the flying icon survives being
+    // removed from dockManager.apps while its 0.25s fade-out plays.
+    @State private var dismissedApp: DockAppModel?
+    @State private var isPresented = !MultitaskDockManager.shared.apps.isEmpty
 
     init(isCollapsed: Bool = false) {
         self.isCollapsed = isCollapsed
@@ -1647,25 +1652,48 @@ struct LCBottomDock: View {
     }
 
     var body: some View {
-        if dockManager.apps.isEmpty {
-            EmptyView()
-        } else {
-            dockBar
-                .onChange(of: pageCount) { newCount in
-                    let clamped = min(page, max(newCount - 1, 0))
-                    if clamped != page {
-                        page = clamped
-                    }
+        dockBar
+            .frame(height: isPresented ? barHeight + 6 : 0, alignment: .bottom)
+            .clipped()
+            // Added after .clipped() so the lifted icon can fly above the bar;
+            // keeping it inside dockBar would cut it off at the frame edge.
+            .overlay(alignment: .topLeading) {
+                liftedIconOverlay
+            }
+            .opacity(isPresented ? 1 : 0)
+            .allowsHitTesting(isPresented)
+            .animation(.easeInOut(duration: 0.25), value: isPresented)
+            .onChange(of: dockManager.apps.isEmpty) { empty in
+                guard empty else {
+                    isPresented = true
+                    return
                 }
-                .onChange(of: dockManager.apps.count) { _ in
+                if isDismissingIcon {
+                    // Let the lifted icon finish its 0.25s exit before the bar
+                    // collapses, otherwise the shrinking frame clips it.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                        if self.dockManager.apps.isEmpty {
+                            self.isPresented = false
+                        }
+                    }
+                } else {
+                    isPresented = false
+                }
+            }
+            .onChange(of: pageCount) { newCount in
+                let clamped = min(page, max(newCount - 1, 0))
+                if clamped != page {
+                    page = clamped
+                }
+            }
+            .onChange(of: dockManager.apps.count) { _ in
+                resetTransientState()
+            }
+            .onChange(of: isCollapsed) { collapsed in
+                if collapsed {
                     resetTransientState()
                 }
-                .onChange(of: isCollapsed) { collapsed in
-                    if collapsed {
-                        resetTransientState()
-                    }
-                }
-        }
+            }
     }
 
     private var dockBar: some View {
@@ -1685,9 +1713,6 @@ struct LCBottomDock: View {
             }
         .contentShape(Capsule(style: .continuous))
         .gesture(dockDragGesture)
-        .overlay(alignment: .topLeading) {
-            liftedIconOverlay
-        }
         .frame(maxWidth: .infinity)
         .padding(.bottom, 6)
         .opacity(isCollapsed ? 0 : 1)
@@ -1746,11 +1771,13 @@ struct LCBottomDock: View {
     @ViewBuilder
     private var liftedIconOverlay: some View {
         if let uuid = liftedAppUUID,
-           let app = dockManager.apps.first(where: { $0.appUUID == uuid }) {
+           let app = dockManager.apps.first(where: { $0.appUUID == uuid }) ?? dismissedApp {
             LCBottomDockIcon(app: app, iconSize: iconSize, onTap: {})
                 .id(app.appUUID)
                 .frame(width: iconSize, height: iconSize)
                 .shadow(color: .black.opacity(0.25), radius: 6, x: 0, y: 3)
+                .scaleEffect(isDismissingIcon ? 0.6 : 1)
+                .opacity(isDismissingIcon ? 0 : 1)
                 .position(x: barPadding + centeredInset + (CGFloat(liftSlot) + 0.5) * slotWidth,
                           y: verticalPadding + iconSize / 2 + liftOffset)
                 .allowsHitTesting(false)
@@ -1824,18 +1851,29 @@ struct LCBottomDock: View {
         liftSlot = slot
         liftedAppUUID = dockManager.apps[index].appUUID
         liftOffset = 0
+        isDismissingIcon = false
     }
 
     private func finishLift(translation: CGFloat) {
         guard let uuid = liftedAppUUID else { return }
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-            liftOffset = 0
-        }
         if translation <= -terminateDistance {
             UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+            // Keep a reference before terminateApp eventually removes it from
+            // dockManager.apps, so the overlay can keep drawing the icon.
+            dismissedApp = dockManager.apps.first(where: { $0.appUUID == uuid })
+            // The guest window still closes immediately; only the dock icon
+            // gets a 0.25s fly-up / fade-out.
             dockManager.terminateApp(uuid)
-            liftedAppUUID = nil
+            withAnimation(.easeIn(duration: 0.25)) {
+                liftOffset = min(liftOffset - 60, -terminateDistance - 70)
+                isDismissingIcon = true
+            }
+            // liftedAppUUID is kept until the app is actually removed so the
+            // slot stays empty while the icon is flying away.
         } else {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                liftOffset = 0
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 if self.liftedAppUUID == uuid {
                     self.liftedAppUUID = nil
@@ -1847,8 +1885,22 @@ struct LCBottomDock: View {
     private func resetTransientState() {
         dragAxis = nil
         horizontalDrag = 0
+        if isDismissingIcon {
+            // Don't cut the exit animation short when the app list updates.
+            let uuid = liftedAppUUID
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                if self.liftedAppUUID == uuid {
+                    self.liftedAppUUID = nil
+                    self.isDismissingIcon = false
+                    self.liftOffset = 0
+                    self.dismissedApp = nil
+                }
+            }
+            return
+        }
         liftedAppUUID = nil
         liftOffset = 0
+        dismissedApp = nil
     }
 
     private func returnToApp(_ app: DockAppModel) {
