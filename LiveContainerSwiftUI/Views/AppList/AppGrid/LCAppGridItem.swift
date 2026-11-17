@@ -17,7 +17,9 @@ struct LCAppGridItem: View {
     @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) private var darkModeIcon = false
 
     private let iconSize: CGFloat = 60
-    private let iconCornerRadius: CGFloat = 13.5
+    // Same radius as IconImageView (width * 0.2667) used by the list view, so
+    // the icon's light edge is clipped away exactly like on the home screen.
+    private var iconCornerRadius: CGFloat { iconSize * 0.2667 }
 
     init(model: LCAppModel,
          onRun: @escaping (Bool?) -> Void,
@@ -57,17 +59,17 @@ struct LCAppGridItem: View {
             .resizable()
             .aspectRatio(contentMode: .fit)
             .frame(width: iconSize, height: iconSize)
-            .clipShape(RoundedRectangle(cornerRadius: iconCornerRadius, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: iconCornerRadius))
             .overlay {
                 if model.isAppRunning {
-                    RoundedRectangle(cornerRadius: iconCornerRadius, style: .continuous)
+                    RoundedRectangle(cornerRadius: iconCornerRadius)
                         .fill(Color.black.opacity(0.25))
                 }
             }
             .overlay {
                 if model.isSigningInProgress {
                     ZStack {
-                        RoundedRectangle(cornerRadius: iconCornerRadius, style: .continuous)
+                        RoundedRectangle(cornerRadius: iconCornerRadius)
                             .fill(Color.black.opacity(0.45))
                         Circle()
                             .trim(from: 0, to: CGFloat(max(0.02, min(model.signProgress, 1))))
@@ -187,7 +189,7 @@ struct LCAppGridButtonStyle: ButtonStyle {
 struct LCAppGridSkeletonItem: View {
     var body: some View {
         VStack(spacing: 7) {
-            RoundedRectangle(cornerRadius: 13.5, style: .continuous)
+            RoundedRectangle(cornerRadius: 60 * 0.2667)
                 .fill(Color.gray.opacity(0.3))
                 .frame(width: 60, height: 60)
             VStack(spacing: 4) {
