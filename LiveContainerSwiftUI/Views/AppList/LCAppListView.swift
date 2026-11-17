@@ -1588,6 +1588,9 @@ struct LCBottomDock: View {
     @State private var liftedAppUUID: String?
     @State private var liftOffset: CGFloat = 0
     @State private var liftSlot: Int = 0
+    // Frozen at lift start. centeredInset depends on apps.count, so recomputing
+    // the overlay x after termination would make the icon jump sideways.
+    @State private var liftAnchorX: CGFloat = 0
     @State private var isDismissingIcon = false
     // Snapshot of the terminating app so the flying icon survives being
     // removed from dockManager.apps while its 0.25s fade-out plays.
@@ -1778,7 +1781,7 @@ struct LCBottomDock: View {
                 .shadow(color: .black.opacity(0.25), radius: 6, x: 0, y: 3)
                 .scaleEffect(isDismissingIcon ? 0.6 : 1)
                 .opacity(isDismissingIcon ? 0 : 1)
-                .position(x: barPadding + centeredInset + (CGFloat(liftSlot) + 0.5) * slotWidth,
+                .position(x: liftAnchorX,
                           y: verticalPadding + iconSize / 2 + liftOffset)
                 .allowsHitTesting(false)
         }
@@ -1849,6 +1852,7 @@ struct LCBottomDock: View {
         let index = effectivePage * iconsPerPage + slot
         guard index < dockManager.apps.count else { return }
         liftSlot = slot
+        liftAnchorX = barPadding + centeredInset + (CGFloat(slot) + 0.5) * slotWidth
         liftedAppUUID = dockManager.apps[index].appUUID
         liftOffset = 0
         isDismissingIcon = false
@@ -1926,8 +1930,10 @@ private struct LCBottomDockIcon: View {
         "\(app.appName)_\(app.appUUID)"
     }
 
+    // Match IconImageView / the list view so the icon edge is clipped the same
+    // way on the dock as it is on the home screen.
     private var cornerRadius: CGFloat {
-        iconSize * 0.225
+        iconSize * 0.2667
     }
 
     init(app: DockAppModel, iconSize: CGFloat, onTap: @escaping () -> Void) {
@@ -1942,7 +1948,7 @@ private struct LCBottomDockIcon: View {
     var body: some View {
         Group {
             if isLoading && appIcon == nil {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                RoundedRectangle(cornerRadius: cornerRadius)
                     .fill(Color.gray.opacity(0.25))
                     .overlay(ProgressView().scaleEffect(0.7))
             } else if let icon = appIcon {
@@ -1950,12 +1956,12 @@ private struct LCBottomDockIcon: View {
                     .resizable()
                     .aspectRatio(contentMode: .fit)
             } else {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                RoundedRectangle(cornerRadius: cornerRadius)
                     .fill(Color.gray.opacity(0.3))
             }
         }
         .frame(width: iconSize, height: iconSize)
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
         .contentShape(Rectangle())
         .onTapGesture {
             onTap()
