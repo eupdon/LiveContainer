@@ -793,6 +793,9 @@ static LCControlAppURLHandling LCHandleControlAppURL(NSURL *url, NSString** modi
 // Mapping: a left swipe (>= 30 pt) before lifting the finger goes home.
 
 static NSString* const LCHomeBarNotificationPrefix = @"com.eupdon.livecontainer.homebar.";
+// Darwin notifications carry no payload, so the current leftward drag distance
+// is shared through the app group before each "move" notification is posted.
+static NSString* const LCHomeBarDragXKey = @"LCHomeBarDragX";
 
 static __weak UITouch* lcHomeBarTrackedTouch = nil;
 static CGPoint lcHomeBarStartPoint = {0, 0};
@@ -865,6 +868,7 @@ static void LCHomeBarScheduleWatchdog(void) {
 
 static void LCHomeBarFinishTouch(UITouch* touch, BOOL cancelled) {
     LCHomeBarCancelWatchdog();
+    [NSUserDefaults.lcSharedDefaults setDouble:0 forKey:LCHomeBarDragXKey];
 
     // `touch.window` can already be nil by the time the end event arrives, so the
     // distance is measured against the last location seen while moving.
@@ -897,8 +901,12 @@ static void LCGuestHandleHomeBarEvent(UIEvent* event) {
         switch(tracked.phase) {
             case UITouchPhaseBegan:
                 break;
-            case UITouchPhaseMoved:
+            case UITouchPhaseMoved: {
+                CGFloat dx = point.x - lcHomeBarStartPoint.x;
+                [NSUserDefaults.lcSharedDefaults setDouble:dx forKey:LCHomeBarDragXKey];
+                LCPostHomeBarNotification(@"move");
                 break;
+            }
             case UITouchPhaseEnded:
                 LCHomeBarFinishTouch(tracked, NO);
                 break;
@@ -930,6 +938,7 @@ static void LCGuestHandleHomeBarEvent(UIEvent* event) {
         lcHomeBarLastPoint = point;
         lcHomeBarTracking = YES;
         lcHomeBarTrackedTouch = touch;
+        [NSUserDefaults.lcSharedDefaults setDouble:0 forKey:LCHomeBarDragXKey];
         LCPostHomeBarNotification(@"begin");
         LCHomeBarScheduleWatchdog();
         break;
