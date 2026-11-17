@@ -139,12 +139,17 @@ class AppInfoProvider {
     private var hostWindowStorage: UIWindow?
     internal var isHomeBarVisible = false
     @Published internal var isHomeBarPressed: Bool = false
+    // Negative while the user drags the bar left. Both the host pan recognizer
+    // and the guest-process bridge write this so the capsule tracks the finger.
+    @Published internal var homeBarDragX: CGFloat = 0
 
     public struct Constants {
         // MARK: - Home Bar (right edge)
         static let homeBarTouchWidth: CGFloat = 30.0
         static let homeBarVisualWidth: CGFloat = 6.0
         static let homeSwipeHomeDistance: CGFloat = 30.0
+        // How far left the capsule can follow the finger.
+        static let homeBarMaxDrag: CGFloat = 80.0
         // User setting: vertical length of the home bar capsule.
         static let defaultHomeBarLength: CGFloat = 88.0
         static var homeBarLength: CGFloat {
@@ -259,6 +264,21 @@ class AppInfoProvider {
         }
     }
 
+    /// Clamped to leftward-only travel so the capsule stays on screen.
+    internal func setHomeBarDragX(_ x: CGFloat) {
+        let clamped = min(0, max(x, -Constants.homeBarMaxDrag))
+        if homeBarDragX != clamped {
+            homeBarDragX = clamped
+        }
+    }
+
+    /// Springs the capsule back to the right edge after the gesture ends.
+    internal func resetHomeBarDragX() {
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+            homeBarDragX = 0
+        }
+    }
+
     /// The bar only draws itself. Its gestures are plain gesture recognizers on
     /// the hosting view, so the bar never interferes with the app windows.
     private func setupHomeBarView() {
@@ -327,8 +347,12 @@ class AppInfoProvider {
         switch recognizer.state {
         case .began:
             setHomeBarPressed(true)
+            setHomeBarDragX(0)
+        case .changed:
+            setHomeBarDragX(translation.x)
         case .ended, .cancelled, .failed:
             setHomeBarPressed(false)
+            resetHomeBarDragX()
             if translation.x <= -Constants.homeSwipeHomeDistance {
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                 goHome()
@@ -349,12 +373,19 @@ class AppInfoProvider {
         case HomeBarGuestBridge.beginSuffix:
             guard isHomeBarVisible else { return }
             setHomeBarPressed(true)
+            setHomeBarDragX(0)
+        case HomeBarGuestBridge.moveSuffix:
+            guard isHomeBarVisible else { return }
+            let x = LCUtils.appGroupUserDefault.double(forKey: HomeBarGuestBridge.dragXKey)
+            setHomeBarDragX(CGFloat(x))
         case HomeBarGuestBridge.homeSuffix:
             setHomeBarPressed(false)
+            resetHomeBarDragX()
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             goHome()
         default:
             setHomeBarPressed(false)
+            resetHomeBarDragX()
         }
     }
 
@@ -581,6 +612,8 @@ struct HomeBarSwiftView: View {
                 .frame(width: MultitaskDockManager.Constants.homeBarVisualWidth,
                        height: barHeight)
                 .shadow(color: .black.opacity(0.35), radius: 2, x: 0, y: 1)
+                // Follows the finger during the swipe; springs back on release.
+                .offset(x: dockManager.homeBarDragX)
                 .padding(.trailing, 2)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -600,11 +633,15 @@ struct HomeBarSwiftView: View {
 enum HomeBarGuestBridge {
     static let notificationPrefix = "com.eupdon.livecontainer.homebar."
     static let beginSuffix = "begin"
+    static let moveSuffix = "move"
     static let homeSuffix = "home"
     static let endSuffix = "end"
     static let cancelSuffix = "cancel"
+    // The guest writes the current leftward drag distance here before posting
+    // move; Darwin notifications themselves carry no payload.
+    static let dragXKey = "LCHomeBarDragX"
 
-    static let allSuffixes = [beginSuffix, homeSuffix, endSuffix, cancelSuffix]
+    static let allSuffixes = [beginSuffix, moveSuffix, homeSuffix, endSuffix, cancelSuffix]
 
     private static var installed = false
 
